@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aviator AI - Pilot Console</title>
+    <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+
+    <audio id="snd-go" src="https://assets.mixkit.co/active_storage/sfx/2000/2000-preview.mp3"></audio>
+    <audio id="snd-warn" src="https://assets.mixkit.co/active_storage/sfx/951/951-preview.mp3"></audio>
+
+    <div class="card">
+        <h2 class="dashboard-title">AVIATOR AI PREDICTOR</h2>
+        
+        <div id="status" class="status-box bg-blue">Connecting to AI Engine...</div>
+        
+        <div class="prediction-box">
+            <span>Next Target Prediction: </span>
+            <span id="next-pred" class="value">---</span>
+        </div>
+
+        <div class="stat-row highlight">
+            <span>Suggested Stake</span>
+            <span id="suggested-bet" class="value">0 UGX</span>
+        </div>
+
+        <div class="stat-row highlight">
+            <span>Auto-Cashout Point</span>
+            <span id="auto-cashout" class="value">0.00x</span>
+        </div>
+
+        <div class="stat-row">
+            <span>Market Trend</span>
+            <span id="trend" class="value">Analyzing --</span>
+        </div>
+
+        <div class="stat-row">
+            <span>Live Balance</span>
+            <span id="balance" class="value">0 UGX</span>
+        </div>
+
+        <div class="stat-row">
+            <span>Session Profit</span>
+            <span id="profit" class="value">0 UGX</span>
+        </div>
+
+        <div class="stat-row">
+            <span>Win Streak</span>
+            <span id="streak" class="streak-value">🔥 0</span>
+        </div>
+        
+        <div class="stat-row">
+            <span>Last Crash</span>
+            <span id="live-multi" class="value">--</span>
+        </div>
+
+        <div class="history-container">
+            <div class="history-title">Recent Crash History</div>
+            <div id="history" class="history-pills"></div>
+        </div>
+    </div>
+
+    <script>
+        let lastDecision = "";
+        let isOffline = false;
+        const API_URL = "http://127.0.0.1:5000"; // Using IP instead of localhost for stability
+
+        async function fetchUpdate() {
+            try {
+                // 1. Fetch live game intelligence
+                const resData = await fetch(`${API_URL}/data`, {
+                    method: 'POST', 
+                    mode: 'cors',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const gameData = await resData.json();
+
+                // 2. Fetch History and Wallet Stats
+                const resStats = await fetch(`${API_URL}/get_stats`, { mode: 'cors' });
+                const stats = await resStats.json();
+
+                if (isOffline) {
+                    document.getElementById('status').innerText = "Reconnected";
+                    isOffline = false;
+                }
+
+                // Update Dynamic UI Fields
+                document.getElementById('balance').innerText = (stats.balance || 0).toLocaleString() + " UGX";
+                document.getElementById('profit').innerText = (stats.profit || 0).toLocaleString() + " UGX";
+                document.getElementById('streak').innerText = "🔥 " + (stats.streak || 0);
+
+                if (gameData.status === "success") {
+                    const statusDiv = document.getElementById('status');
+                    
+                    document.getElementById('live-multi').innerText = gameData.latest_crash + "x";
+                    document.getElementById('suggested-bet').innerText = gameData.suggested_bet;
+                    document.getElementById('auto-cashout').innerText = gameData.cashout_at;
+                    document.getElementById('next-pred').innerText = gameData.cashout_at;
+                    
+                    // Status Logic & Sounds
+                    statusDiv.innerText = gameData.decision;
+                    if (gameData.decision !== lastDecision) {
+                        if (gameData.decision.includes("SAFE") || gameData.decision.includes("PUSH")) {
+                            document.getElementById('snd-go').play().catch(() => {});
+                            statusDiv.className = "status-box bg-green";
+                        } else if (gameData.decision.includes("TRAP") || gameData.decision.includes("WAIT")) {
+                            document.getElementById('snd-warn').play().catch(() => {});
+                            statusDiv.className = "status-box bg-red";
+                        } else {
+                            statusDiv.className = "status-box bg-blue";
+                        }
+                        lastDecision = gameData.decision;
+                    }
+                }
+
+                // Update Trend & History
+                updateHistoryUI(stats.history || []);
+                if (stats.history && stats.history.length >= 2) {
+                    const trendSpan = document.getElementById('trend');
+                    const current = stats.history[stats.history.length - 1];
+                    const previous = stats.history[stats.history.length - 2];
+                    trendSpan.innerHTML = current > previous ? 
+                        '<span class="trend-up" style="color:#58cc02">Rising ↑</span>' : 
+                        '<span class="trend-down" style="color:#ff4b4b">Dropping ↓</span>';
+                }
+
+            } catch (e) { 
+                console.error("Dashboard Sync Error:", e);
+                isOffline = true;
+                document.getElementById('status').innerText = "CORS / Server Offline";
+                document.getElementById('status').className = "status-box bg-red";
+            }
+        }
+
+        function updateHistoryUI(historyArray) {
+            const container = document.getElementById('history');
+            if (!historyArray || historyArray.length === 0) return;
+            container.innerHTML = '';
+            [...historyArray].reverse().forEach(num => {
+                const type = num >= 2.0 ? 'high' : 'low';
+                const pill = document.createElement('span');
+                pill.className = `pill ${type}`;
+                pill.innerText = num + "x";
+                container.appendChild(pill);
+            });
+        }
+
+        // 500ms sync speed
+        setInterval(fetchUpdate, 500);
+    </script>
+</body>
+</html>

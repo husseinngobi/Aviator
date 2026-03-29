@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Aviator Data Bridge",
+  "version": "1.0",
+  "description": "Extracts WebSocket data from Fortebet for analysis.",
+  "permissions": ["debugger", "storage", "tabs"],
+  "host_permissions": ["*://*.fortebet.ug/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.fortebet.ug/*"],
+      "js": ["content.js"]
+    }
+  ]
+}
