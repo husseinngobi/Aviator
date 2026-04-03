@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <title>Aviator AI - Pilot Console</title>
     <link rel="stylesheet" href="dashboard.css">
 </head>
@@ -12,144 +13,156 @@
     <audio id="snd-warn" src="https://assets.mixkit.co/active_storage/sfx/951/951-preview.mp3"></audio>
 
     <div class="card">
-        <h2 class="dashboard-title">AVIATOR AI PREDICTOR</h2>
+        <div class="header-flex">
+            <h2 class="dashboard-title">AVIATOR AI PREDICTOR</h2>
+            <div id="connection-dot" class="dot-online"></div>
+        </div>
         
-        <div id="status" class="status-box bg-blue">Connecting to AI Engine...</div>
+        <div id="status" class="status-box bg-blue">INITIALIZING ENGINE...</div>
         
         <div class="prediction-box">
-            <span>Next Target Prediction: </span>
+            <span class="label">NEXT TARGET</span>
             <span id="next-pred" class="value">---</span>
         </div>
 
-        <div class="stat-row highlight">
-            <span>Suggested Stake</span>
-            <span id="suggested-bet" class="value">0 UGX</span>
-        </div>
+        <div class="stats-grid">
+            <div class="stat-row highlight">
+                <span>Suggested Stake</span>
+                <span id="suggested-bet" class="value">0 UGX</span>
+            </div>
 
-        <div class="stat-row highlight">
-            <span>Auto-Cashout Point</span>
-            <span id="auto-cashout" class="value">0.00x</span>
-        </div>
+            <div class="stat-row highlight">
+                <span>Auto-Cashout</span>
+                <span id="auto-cashout" class="value">0.00x</span>
+            </div>
 
-        <div class="stat-row">
-            <span>Market Trend</span>
-            <span id="trend" class="value">Analyzing --</span>
-        </div>
+            <div class="stat-row">
+                <span>Market Trend</span>
+                <span id="trend" class="value">Analyzing...</span>
+            </div>
 
-        <div class="stat-row">
-            <span>Live Balance</span>
-            <span id="balance" class="value">0 UGX</span>
-        </div>
+            <div class="stat-row">
+                <span>Live Balance</span>
+                <span id="balance" class="value">0 UGX</span>
+            </div>
 
-        <div class="stat-row">
-            <span>Session Profit</span>
-            <span id="profit" class="value">0 UGX</span>
-        </div>
+            <div class="stat-row">
+                <span>Session Profit</span>
+                <span id="profit" class="value">0 UGX</span>
+            </div>
 
-        <div class="stat-row">
-            <span>Win Streak</span>
-            <span id="streak" class="streak-value">🔥 0</span>
-        </div>
-        
-        <div class="stat-row">
-            <span>Last Crash</span>
-            <span id="live-multi" class="value">--</span>
+            <div class="stat-row">
+                <span>Win Streak</span>
+                <span id="streak" class="streak-value">🔥 0</span>
+            </div>
+            
+            <div class="stat-row">
+                <span>Last Result</span>
+                <span id="live-multi" class="value">--</span>
+            </div>
         </div>
 
         <div class="history-container">
-            <div class="history-title">Recent Crash History</div>
+            <div class="history-header">
+                <span class="history-title">LIVE HISTORY</span>
+                <span id="round-count" class="count-tag">0 Rounds</span>
+            </div>
             <div id="history" class="history-pills"></div>
         </div>
+
+        <button id="sim-btn" onclick="toggleSimulation()" class="sim-toggle">MODE: LIVE</button>
     </div>
 
     <script>
         let lastDecision = "";
-        let isOffline = false;
-        const API_URL = "http://127.0.0.1:5000"; // Using IP instead of localhost for stability
+        let isSimulation = false;
+        const API_URL = "http://127.0.0.1:5000";
+
+        function toggleSimulation() {
+            isSimulation = !isSimulation;
+            const btn = document.getElementById('sim-btn');
+            btn.innerText = isSimulation ? "MODE: SIMULATION" : "MODE: LIVE";
+            btn.classList.toggle('active-sim');
+        }
 
         async function fetchUpdate() {
             try {
-                // 1. Fetch live game intelligence
-                const resData = await fetch(`${API_URL}/data`, {
-                    method: 'POST', 
-                    mode: 'cors',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({})
-                });
-                const gameData = await resData.json();
-
-                // 2. Fetch History and Wallet Stats
-                const resStats = await fetch(`${API_URL}/get_stats`, { mode: 'cors' });
+                // If in simulation, we skip the real API for a moment (optional logic here)
+                const resStats = await fetch(`${API_URL}/get_stats`);
                 const stats = await resStats.json();
 
-                if (isOffline) {
-                    document.getElementById('status').innerText = "Reconnected";
-                    isOffline = false;
+                // 1. Update Core UI
+                document.getElementById('balance').innerText = stats.balance;
+                document.getElementById('profit').innerText = stats.profit;
+                document.getElementById('streak').innerText = "🔥 " + stats.streak;
+                document.getElementById('round-count').innerText = (stats.history?.length || 0) + " Rounds";
+
+                // 2. Decision Logic & Trap Handling
+                const statusDiv = document.getElementById('status');
+                statusDiv.innerText = stats.decision;
+
+                if (stats.decision !== lastDecision) {
+                    if (stats.decision.includes("SAFE") || stats.decision.includes("BULLISH")) {
+                        document.getElementById('snd-go').play().catch(()=>{});
+                        statusDiv.className = "status-box bg-green";
+                    } else if (stats.decision.includes("TRAP") || stats.decision.includes("WAIT")) {
+                        document.getElementById('snd-warn').play().catch(()=>{});
+                        statusDiv.className = "status-box bg-red highlight-blink";
+                    } else {
+                        statusDiv.className = "status-box bg-blue";
+                    }
+                    lastDecision = stats.decision;
                 }
 
-                // Update Dynamic UI Fields
-                document.getElementById('balance').innerText = (stats.balance || 0).toLocaleString() + " UGX";
-                document.getElementById('profit').innerText = (stats.profit || 0).toLocaleString() + " UGX";
-                document.getElementById('streak').innerText = "🔥 " + (stats.streak || 0);
-
-                if (gameData.status === "success") {
-                    const statusDiv = document.getElementById('status');
+                // 3. Update Targets
+                document.getElementById('suggested-bet').innerText = stats.next_stake;
+                document.getElementById('auto-cashout').innerText = stats.next_exit;
+                document.getElementById('next-pred').innerText = stats.next_exit;
+                
+                if (stats.history?.length) {
+                    document.getElementById('live-multi').innerText = stats.history[0] + "x";
+                    updateHistoryUI(stats.history);
                     
-                    document.getElementById('live-multi').innerText = gameData.latest_crash + "x";
-                    document.getElementById('suggested-bet').innerText = gameData.suggested_bet;
-                    document.getElementById('auto-cashout').innerText = gameData.cashout_at;
-                    document.getElementById('next-pred').innerText = gameData.cashout_at;
-                    
-                    // Status Logic & Sounds
-                    statusDiv.innerText = gameData.decision;
-                    if (gameData.decision !== lastDecision) {
-                        if (gameData.decision.includes("SAFE") || gameData.decision.includes("PUSH")) {
-                            document.getElementById('snd-go').play().catch(() => {});
-                            statusDiv.className = "status-box bg-green";
-                        } else if (gameData.decision.includes("TRAP") || gameData.decision.includes("WAIT")) {
-                            document.getElementById('snd-warn').play().catch(() => {});
-                            statusDiv.className = "status-box bg-red";
-                        } else {
-                            statusDiv.className = "status-box bg-blue";
-                        }
-                        lastDecision = gameData.decision;
+                    // Trend Detection
+                    const trendSpan = document.getElementById('trend');
+                    if (stats.history.length >= 2) {
+                        const isRising = stats.history[0] > stats.history[1];
+                        trendSpan.innerHTML = isRising ? 
+                            '<span class="trend-up">RISING ↑</span>' : 
+                            '<span class="trend-down">DROPPING ↓</span>';
                     }
                 }
 
-                // Update Trend & History
-                updateHistoryUI(stats.history || []);
-                if (stats.history && stats.history.length >= 2) {
-                    const trendSpan = document.getElementById('trend');
-                    const current = stats.history[stats.history.length - 1];
-                    const previous = stats.history[stats.history.length - 2];
-                    trendSpan.innerHTML = current > previous ? 
-                        '<span class="trend-up" style="color:#58cc02">Rising ↑</span>' : 
-                        '<span class="trend-down" style="color:#ff4b4b">Dropping ↓</span>';
-                }
-
+                document.getElementById('connection-dot').className = "dot-online";
             } catch (e) { 
-                console.error("Dashboard Sync Error:", e);
-                isOffline = true;
-                document.getElementById('status').innerText = "CORS / Server Offline";
+                document.getElementById('status').innerText = "OFFLINE";
                 document.getElementById('status').className = "status-box bg-red";
+                document.getElementById('connection-dot').className = "dot-offline";
             }
         }
-
+        function downloadLog() {
+            fetch(`${API_URL}/get_stats`)
+                .then(res => res.json())
+                .then(data => {
+                    const blob = new Blob([JSON.stringify(data, null, 2)], {type : 'application/json'});
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = `Aviator_Session_${Date.now()}.json`;
+                    a.click();
+                });
+        }
         function updateHistoryUI(historyArray) {
             const container = document.getElementById('history');
-            if (!historyArray || historyArray.length === 0) return;
             container.innerHTML = '';
-            [...historyArray].reverse().forEach(num => {
-                const type = num >= 2.0 ? 'high' : 'low';
+            historyArray.forEach(num => {
                 const pill = document.createElement('span');
-                pill.className = `pill ${type}`;
+                pill.className = `pill ${num >= 2.0 ? 'high' : 'low'}`;
                 pill.innerText = num + "x";
                 container.appendChild(pill);
             });
         }
 
-        // 500ms sync speed
-        setInterval(fetchUpdate, 500);
+        setInterval(fetchUpdate, 1000); // 1s is safer for browser performance
     </script>
 </body>
 </html>

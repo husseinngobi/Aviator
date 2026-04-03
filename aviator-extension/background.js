@@ -1,29 +1,55 @@
-// Detect when you open Fortebet and start the debugger
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    if (changeInfo.status === 'complete' && tab.url && tab.url.includes('fortebet.ug')) {
-        chrome.debugger.attach({ tabId: tabId }, "1.3", () => {
-            chrome.debugger.sendCommand({ tabId: tabId }, "Network.enable");
-            console.log("Monitoring started on Fortebet.");
-        });
-    }
-});
+chrome.action.onClicked.addListener(async (tab) => {
+    if (!tab.id) return;
 
-// Capture every WebSocket frame
-chrome.debugger.onEvent.addListener((source, method, params) => {
-    if (method === "Network.webSocketFrameReceived") {
-        const payload = params.response.payloadData;
-        
-        // This is where we send the data to your VS Code project's backend
-        // We'll build the 'http://localhost:5000/data' receiver in Phase 2
-        fetch("http://localhost:5000/data", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                raw: payload,
-                timestamp: Date.now()
-            })
-        }).catch(err => {
-            // Server might be off, that's fine
-        });
-    }
+    await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: "MAIN",
+        func: () => {
+            if (window.__WS_MONITOR_ACTIVE__) return;
+            window.__WS_MONITOR_ACTIVE__ = true;
+
+            const OriginalWebSocket = window.WebSocket;
+            const monitorStore = [];
+
+            window.WebSocket = function (...args) {
+                const socket = new OriginalWebSocket(...args);
+
+                socket.addEventListener("open", () => {
+                    console.log("[WS MONITOR] open", socket.url);
+                });
+
+                socket.addEventListener("message", (event) => {
+                    let payload = event.data;
+
+                    try {
+                        payload = JSON.parse(event.data);
+                    } catch {
+                        payload = event.data;
+                    }
+
+                    monitorStore.push({
+                        url: socket.url,
+                        timestamp: Date.now(),
+                        payload
+                    });
+
+                    console.log("[WS MONITOR] message", payload);
+                });
+
+                socket.addEventListener("error", (error) => {
+                    console.warn("[WS MONITOR] error", error);
+                });
+
+                socket.addEventListener("close", () => {
+                    console.log("[WS MONITOR] close", socket.url);
+                });
+
+                return socket;
+            };
+
+            window.WebSocket.prototype = OriginalWebSocket.prototype;
+            console.log("[WS MONITOR] injected");
+            window.__WS_MONITOR_STORE__ = monitorStore;
+        }
+    });
 });

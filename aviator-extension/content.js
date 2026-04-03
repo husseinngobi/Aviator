@@ -1,21 +1,26 @@
-// This script runs INSIDE the Fortebet page
-function scrapeBalance() {
-    // We look for the specific HTML element that holds your UGX balance
-    // Note: You may need to inspect the element on Fortebet to get the exact class name
-    const balanceElement = document.querySelector('.user-balance') || document.querySelector('.balance-amount');
-    
-    if (balanceElement) {
-        const balanceText = balanceElement.innerText.replace(/[^0-9.-]+/g,"");
-        const balanceValue = parseFloat(balanceText);
+(() => {
+    if (window.__WS_MONITOR_CONTENT_ACTIVE__) return;
+    window.__WS_MONITOR_CONTENT_ACTIVE__ = true;
 
-        // Send this balance to your Python Server
-        fetch("http://localhost:5000/balance", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ balance: balanceValue })
-        }).catch(() => {});
-    }
-}
+    const OriginalWebSocket = window.WebSocket;
 
-// Scrape every 5 seconds to keep the Python server updated
-setInterval(scrapeBalance, 5000);
+    window.WebSocket = function (...args) {
+        const socket = new OriginalWebSocket(...args);
+
+        socket.addEventListener("message", (event) => {
+            window.postMessage(
+                {
+                    source: "ws-monitor",
+                    type: "message",
+                    url: socket.url,
+                    payload: event.data
+                },
+                "*"
+            );
+        });
+
+        return socket;
+    };
+
+    window.WebSocket.prototype = OriginalWebSocket.prototype;
+})();

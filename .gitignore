@@ -6,3 +6,8 @@ dist/
 *.log
 .DS_Store
 Thumbs.db
+.venv/
+__pycache__/
+*.pyc
+crash_log.txt
+session_data.json

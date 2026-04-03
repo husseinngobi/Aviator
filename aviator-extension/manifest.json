@@ -1,17 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "Aviator Data Bridge",
+  "name": "WebSocket Monitor Bridge",
   "version": "1.0",
-  "description": "Extracts WebSocket data from Fortebet for analysis.",
-  "permissions": ["debugger", "storage", "tabs"],
-  "host_permissions": ["*://*.fortebet.ug/*"],
+  "description": "Manual WebSocket monitoring scaffold for pages you choose to inspect.",
+  "permissions": ["activeTab", "scripting", "storage"],
   "background": {
     "service_worker": "background.js"
   },
-  "content_scripts": [
-    {
-      "matches": ["*://*.fortebet.ug/*"],
-      "js": ["content.js"]
-    }
-  ]
+  "action": {
+    "default_title": "Inject WebSocket Monitor"
+  }
 }
