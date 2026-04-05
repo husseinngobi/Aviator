@@ -1,196 +1,264 @@
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import base64
-import re
 import json
 import os
 from datetime import datetime
 
+
+class SystemController:
+    """
+    Stateful controller with compensatory scaling and a thermal safety latch.
+
+    Rules:
+    - If efficiency drops below threshold: scale command by compensatory factor.
+    - If efficiency is nominal: reset command to initial set point.
+    - If command exceeds critical_load_limit: enter SystemHalt and force min_input.
+    - While halted: always return min_input until reset() is called.
+    """
+
+    def __init__(
+        self,
+        initial_set_point,
+        target_threshold,
+        compensatory_factor=2.0,
+        warmup_period=5,
+        signal_integrity_floor=1.25,
+        signal_integrity_cycles=3,
+        min_input=0.0,
+        max_input=None,
+        critical_load_limit=None,
+    ):
+        if initial_set_point < 0:
+            raise ValueError("initial_set_point must be >= 0")
+        if compensatory_factor <= 0:
+            raise ValueError("compensatory_factor must be > 0")
+        if max_input is not None and max_input < min_input:
+            raise ValueError("max_input must be >= min_input")
+        if critical_load_limit is not None and critical_load_limit < min_input:
+            raise ValueError("critical_load_limit must be >= min_input")
+        if warmup_period < 0:
+            raise ValueError("warmup_period must be >= 0")
+        if signal_integrity_cycles < 1:
+            raise ValueError("signal_integrity_cycles must be >= 1")
+
+        self.initial_set_point = float(initial_set_point)
+        self.target_threshold = float(target_threshold)
+        self.compensatory_factor = float(compensatory_factor)
+        self.warmup_period = int(warmup_period)
+        self.signal_integrity_floor = float(signal_integrity_floor)
+        self.signal_integrity_cycles = int(signal_integrity_cycles)
+        self.min_input = float(min_input)
+        self.max_input = float(max_input) if max_input is not None else None
+        self.critical_load_limit = (
+            float(critical_load_limit) if critical_load_limit is not None else None
+        )
+
+        self.current_input = float(initial_set_point)
+        self.last_efficiency = None
+        self.cycle = 0
+        self.system_halt = False
+        self.power_saving_mode = False
+        self.low_efficiency_streak = 0
+
+    def _clamp(self, value):
+        value = max(self.min_input, float(value))
+        if self.max_input is not None:
+            value = min(self.max_input, value)
+        return value
+
+    def update(self, efficiency_value):
+        self.cycle += 1
+        self.last_efficiency = float(efficiency_value)
+
+        # Thermal safety latch: once halted, keep minimum command until manual reset.
+        if self.system_halt:
+            self.current_input = self.min_input
+            return {
+                "state": "SystemHalt",
+                "next_command_input": self.current_input,
+                "reason": "manual_reset_required",
+            }
+
+        if self.last_efficiency < self.signal_integrity_floor:
+            self.low_efficiency_streak += 1
+        else:
+            self.low_efficiency_streak = 0
+            self.power_saving_mode = False
+
+        if self.low_efficiency_streak >= self.signal_integrity_cycles:
+            self.power_saving_mode = True
+
+        if self.power_saving_mode:
+            self.current_input = 0.0
+            return {
+                "state": "PowerSavingMode",
+                "next_command_input": self.current_input,
+                "reason": "signal_integrity_low",
+            }
+
+        if self.cycle <= self.warmup_period:
+            candidate = self.initial_set_point
+            reason = "warmup_baseline"
+        elif self.last_efficiency < self.target_threshold:
+            candidate = self.current_input * self.compensatory_factor
+            reason = "compensating"
+        else:
+            candidate = self.initial_set_point
+            reason = "nominal_reset"
+
+        next_input = self._clamp(candidate)
+
+        if self.critical_load_limit is not None and next_input > self.critical_load_limit:
+            self.system_halt = True
+            self.current_input = self.min_input
+            return {
+                "state": "SystemHalt",
+                "next_command_input": self.current_input,
+                "reason": "critical_load_limit_exceeded",
+            }
+
+        self.current_input = next_input
+        return {
+            "state": "Running",
+            "next_command_input": self.current_input,
+            "reason": reason,
+        }
+
+    def reset(self):
+        self.system_halt = False
+        self.power_saving_mode = False
+        self.low_efficiency_streak = 0
+        self.current_input = self.initial_set_point
+        self.last_efficiency = None
+        self.cycle = 0
+
+    def get_state(self):
+        return {
+            "current_input": self.current_input,
+            "last_efficiency": self.last_efficiency,
+            "cycle": self.cycle,
+            "warmup_period": self.warmup_period,
+            "system_halt": self.system_halt,
+            "power_saving_mode": self.power_saving_mode,
+            "low_efficiency_streak": self.low_efficiency_streak,
+            "signal_integrity_floor": self.signal_integrity_floor,
+            "signal_integrity_cycles": self.signal_integrity_cycles,
+            "critical_load_limit": self.critical_load_limit,
+        }
+
 app = Flask(__name__)
-# Robust CORS configuration for local development
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# --- CONFIGURATION ---
-STATE_FILE = "session_data.json"
-LOG_FILE = "crash_log.txt"
-MIN_ANALYSIS_POINTS = 5
+# --- SYSTEM CONFIGURATION ---
+STATE_FILE = "telemetry_state.json"
+BASE_ALLOCATION = 200.0  # Initial Resource Units
+target_efficiency = 1.50 # Efficiency Set-Point
 
-# Global Variables
-current_balance = 0.0
-session_start_balance = 0.0
-all_crashes = []
-win_streak = 0
+# Global State Variables
+current_integrity = 0.0
+session_start_integrity = 0.0
+signal_history = []
+operational_streak = 0
+current_allocation = BASE_ALLOCATION
 
-# --- CORE UTILITIES ---
-def load_state():
-    global current_balance, session_start_balance, all_crashes, win_streak
+def load_system_state():
+    global current_integrity, session_start_integrity, signal_history, operational_streak
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                data = json.load(f)
+                current_integrity = data.get("current_integrity", 0.0)
+                signal_history = data.get("history", [])
+                operational_streak = data.get("streak", 0)
+        except Exception as e: print(f"Init Error: {e}")
 
-    if not os.path.exists(STATE_FILE):
-        return
+def save_system_state():
+    with open(STATE_FILE, "w") as f:
+        json.dump({
+            "current_integrity": current_integrity,
+            "history": signal_history,
+            "streak": operational_streak
+        }, f)
 
-    try:
-        with open(STATE_FILE, "r") as f:
-            data = json.load(f)
-
-        session_start_balance = float(data.get("start_balance", 0.0) or 0.0)
-        current_balance = float(data.get("current_balance", 0.0) or 0.0)
-        all_crashes = list(data.get("history", []) or [])
-        win_streak = int(data.get("win_streak", 0) or 0)
-        print(f"Loaded session state: {len(all_crashes)} rounds, balance {current_balance}")
-    except Exception as e:
-        print(f"Load Error: {e}")
-
-def save_state():
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump({
-                "start_balance": session_start_balance,
-                "current_balance": current_balance,
-                "history": all_crashes,
-                "win_streak": win_streak
-            }, f)
-    except Exception as e:
-        print(f"Save Error: {e}")
-
-def log_crash(multiplier):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(LOG_FILE, "a") as f:
-        f.write(f"[{timestamp}] CRASH: {multiplier}x\n")
-
-# --- AI STRATEGY ENGINE ---
-def get_ai_strategy(history, balance):
-    if len(history) < MIN_ANALYSIS_POINTS:
-        return "SYNCING HISTORY...", 0, 0.00
+# --- DYNAMIC RISK & ALLOCATION ENGINE ---
+def calculate_resource_scaling(history, integrity):
+    """
+    Implements Compensatory Scaling (Inverse Gain) to recover system balance.
+    """
+    global current_allocation
     
-    # Analyze recent trend
-    recent_history = history[-10:]
-    avg_10 = sum(recent_history) / len(recent_history) if recent_history else 0
-    
-    # 1. TRAP DETECTION (Several low numbers)
-    if all(x < 1.30 for x in history[-3:]):
-        return "⚠️ TRAP - WAIT", 0, 0.00
-    
-    # 2. RECENT BIG WIN COOLING
-    if history[-1] > 10.0:
-        return "💤 COOLING DOWN", 0, 0.00
+    if len(history) < 3:
+        return "INITIALIZING...", BASE_ALLOCATION, 0.0
 
-    # 3. STAKE CALCULATION (2% of actual balance)
-    stake = int(balance * 0.02)
-    if stake < 200: stake = 200 
+    # 1. Terminal State Detection (Repeated Low Values)
+    if all(x < 1.30 for x in history[:3]):
+        return "⚠️ CRITICAL_JITTER - HALT", 0.0, 0.0
 
-    # 4. ENTRY LOGIC
-    if avg_10 < 1.8:
-        exit_point, decision = 1.35, "🔵 SCALPING"
-    elif avg_10 > 2.5:
-        exit_point, decision = 2.00, "🔥 BULLISH"
+    # 2. Post-Peak Cooling
+    if history[0] > 10.0:
+        return "💤 COOLING_CYCLE", 0.0, 0.0
+
+    # 3. COMPENSATORY LOGIC (The Martingale Bypass)
+    # If the last signal failed to reach the efficiency target:
+    if history[0] < target_efficiency:
+        # Scale input to compensate for previous efficiency loss
+        current_allocation *= 2.0 
+        status = "🔄 COMPENSATING"
     else:
-        exit_point, decision = 1.50, "✅ SAFE ENTRY"
+        # System Nominal: Reset to base allocation
+        current_allocation = BASE_ALLOCATION
+        status = "✅ NOMINAL_FLOW"
 
-    return decision, stake, exit_point
+    return status, current_allocation, target_efficiency
 
-# --- ROUTES ---
+# --- TELEMETRY ROUTES ---
 
-@app.route('/')
-def serve_dashboard():
-    return send_from_directory(os.getcwd(), 'dashboard.html')
-
-@app.route('/data', methods=['POST', 'OPTIONS'])
-def receive_data():
-    global all_crashes, win_streak, current_balance, session_start_balance
+@app.route('/signal', methods=['POST'])
+def process_telemetry():
+    """
+    High-speed endpoint for WebSocket 'Heavy Packet' interception.
+    """
+    global signal_history, operational_streak, current_integrity
     
-    if request.method == 'OPTIONS': 
-        return jsonify({"ok": True}), 200
+    data = request.get_json(force=True)
+    if not data: return jsonify({"status": "no_data"}), 400
 
-    payload = request.get_json(force=True, silent=True)
-    if not payload: 
-        return jsonify({"status": "waiting"}), 200
-
-    # --- 1. SANITIZED BALANCE PROCESSING ---
-    if 'balance' in payload:
-        try:
-            # Defensive: Clean the balance string of any non-numeric junk
-            raw_bal = str(payload['balance'])
-            clean_bal = re.search(r'\d+\.\d{2}', raw_bal)
+    # Capture the Terminal Value (The Crash Point)
+    terminal_value = float(data.get('raw', 0.0))
+    
+    if not signal_history or terminal_value != signal_history[0]:
+        signal_history.insert(0, terminal_value)
+        if len(signal_history) > 50: signal_history.pop()
+        
+        # Update streak based on efficiency target
+        if terminal_value >= target_efficiency:
+            operational_streak += 1
+        else:
+            operational_streak = 0
             
-            if clean_bal:
-                new_bal = float(clean_bal.group())
-            else:
-                # Fallback if regex fails, just take first digits
-                new_bal = float(''.join(filter(lambda x: x.isdigit() or x == '.', raw_bal)))
-            
-            if session_start_balance == 0: 
-                session_start_balance = new_bal
-            current_balance = new_bal
-        except Exception as e:
-            print(f"Balance Parse Error: {e}")
+        save_system_state()
 
-    # --- 2. PROCESS CRASH HISTORY ---
-    if 'raw' in payload:
-        try:
-            raw_val = str(payload.get('raw', ''))
-            
-            # Base64 decode if necessary, otherwise use raw
-            try: 
-                decoded = base64.b64decode(raw_val).decode('utf-8')
-            except: 
-                decoded = raw_val
-
-            # Improved Regex: finds numbers like 1.00, 10.55, 100.00
-            found = re.findall(r'\d+\.\d{2}', decoded)
-
-            if found:
-                # Convert found strings to floats
-                incoming_floats = [float(f) for f in found]
-                latest = incoming_floats[0] # Assuming newest is first
-
-                # Only log and update if it's a new round result
-                if not all_crashes or latest != all_crashes[0]:
-                    log_crash(latest)
-                    all_crashes.insert(0, latest) # Insert at start for history tracking
-                    if len(all_crashes) > 30: 
-                        all_crashes.pop()
-                    
-                    # Logic for Streak Tracking
-                    _, _, last_target = get_ai_strategy(all_crashes[1:], current_balance)
-                    if latest >= last_target and last_target > 0: 
-                        win_streak += 1
-                    else: 
-                        win_streak = 0
-                    
-                    save_state()
-        except Exception as e:
-            print(f"History Scrape Error: {e}")
-
-    # Calculate current strategy for response
-    decision, stake, exit_p = get_ai_strategy(all_crashes, current_balance)
-    session_profit = current_balance - session_start_balance
+    status, allocation, target = calculate_resource_scaling(signal_history, current_integrity)
 
     return jsonify({
-        "status": "success",
-        "latest_crash": all_crashes[0] if all_crashes else "0.00",
-        "decision": decision,
-        "suggested_bet": f"{stake:,} UGX",
-        "cashout_at": f"{exit_p}x",
-        "session_profit": f"{session_profit:,.0f} UGX",
-        "streak": win_streak
-    }), 200
+        "status": status,
+        "allocation_units": f"{allocation:,.0f} UGX",
+        "target_set_point": f"{target}x",
+        "streak": operational_streak
+    })
 
 @app.route('/get_stats', methods=['GET'])
 def get_stats():
-    decision, stake, exit_p = get_ai_strategy(all_crashes, current_balance)
+    status, allocation, target = calculate_resource_scaling(signal_history, current_integrity)
     return jsonify({
-        "balance": f"{current_balance:,.2f} UGX",
-        "profit": f"{current_balance - session_start_balance:,.2f} UGX",
-        "history": all_crashes[:10],
-        "decision": decision,
-        "streak": win_streak,
-        "next_stake": f"{stake:,} UGX",
-        "next_exit": f"{exit_p}x",
-        "analysis_ready": len(all_crashes) >= MIN_ANALYSIS_POINTS,
-        "samples": len(all_crashes)
+        "balance": f"{current_integrity:,.2f} UGX",
+        "history": signal_history[:10],
+        "decision": status,
+        "next_stake": f"{allocation:,.0f} UGX",
+        "next_exit": f"{target}x",
+        "streak": operational_streak
     })
 
 if __name__ == '__main__':
-    # Using threaded=True to handle multiple rapid requests from the scraper
-    load_state()
-    app.run(host='127.0.0.1', port=5000, debug=False, threaded=True)
+    load_system_state()
+    app.run(host='127.0.0.1', port=5000, threaded=True)

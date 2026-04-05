@@ -1,40 +1,92 @@
-// WebSocket Sniffer for browser DevTools
-// Paste this in your browser console to log all WebSocket messages in real time
-(function() {
-  const open = window.WebSocket.prototype.open || window.WebSocket.prototype.constructor;
-  const wsInstances = [];
-  const origWebSocket = window.WebSocket;
+(function () {
+    if (window.__TELEMETRY_MONITOR_ACTIVE__) {
+        console.warn("Telemetry monitor is already active.");
+        return;
+    }
 
-  window.WebSocket = function(...args) {
-    const ws = new origWebSocket(...args);
-    wsInstances.push(ws);
+    window.__TELEMETRY_MONITOR_ACTIVE__ = true;
 
-    ws.addEventListener('message', function(event) {
-      try {
-        let data = event.data;
-        try { data = JSON.parse(event.data); } catch {}
-        console.log('[WS MESSAGE]', data);
-      } catch (e) {
-        console.warn('[WS ERROR]', e);
-      }
-    });
+    const ActualWS = window.WebSocket;
+    const THRESHOLD_BYTES = 400;
+    const SIGNAL_URL = "http://127.0.0.1:5000/signal";
 
-    ws.addEventListener('open', function() {
-      console.log('[WS OPEN]', ws.url);
-    });
+    function getPacketSize(payload) {
+        if (typeof payload === "string") {
+            return new TextEncoder().encode(payload).length;
+        }
 
-    ws.addEventListener('close', function() {
-      console.log('[WS CLOSE]', ws.url);
-    });
+        if (payload instanceof Blob) {
+            return payload.size;
+        }
 
-    ws.addEventListener('error', function(e) {
-      console.warn('[WS ERROR]', e);
-    });
+        if (payload instanceof ArrayBuffer) {
+            return payload.byteLength;
+        }
 
-    return ws;
-  };
-  window.WebSocket.prototype = origWebSocket.prototype;
-  window.WebSocket.__proto__ = origWebSocket;
+        if (ArrayBuffer.isView(payload)) {
+            return payload.byteLength;
+        }
 
-  console.log('✅ WebSocket sniffer injected. All messages will be logged in the console.');
+        return 0;
+    }
+
+    function tryParseJSON(payload) {
+        if (typeof payload !== "string") return null;
+        try {
+            return JSON.parse(payload);
+        } catch {
+            return null;
+        }
+    }
+
+    window.WebSocket = function (...args) {
+        const instance = new ActualWS(...args);
+
+        instance.addEventListener("message", (event) => {
+            const payload = event.data;
+            const size = getPacketSize(payload);
+            const json = tryParseJSON(payload);
+
+            // Optional marker support for systems that use a terminal-state packet flag.
+            const hasTerminalMarker = Boolean(json && json.type === "f");
+
+            if (size > THRESHOLD_BYTES || hasTerminalMarker) {
+                const detail = {
+                    timestamp: performance.now(),
+                    weight: size,
+                    source: instance.url,
+                    marker: hasTerminalMarker ? "type:f" : "size-threshold"
+                };
+
+                window.dispatchEvent(new CustomEvent("EmergencyStop", { detail }));
+
+                const body = JSON.stringify({
+                    event: "TERMINAL_STATE",
+                    latency: detail.timestamp,
+                    packetSize: size,
+                    source: instance.url,
+                    marker: detail.marker
+                });
+
+                navigator.sendBeacon(SIGNAL_URL, new Blob([body], { type: "application/json" }));
+            }
+
+            window.dispatchEvent(
+                new CustomEvent("TelemetryTick", {
+                    detail: {
+                        timestamp: performance.now(),
+                        size,
+                        source: instance.url
+                    }
+                })
+            );
+        });
+
+        return instance;
+    };
+
+    window.WebSocket.prototype = ActualWS.prototype;
+    Object.setPrototypeOf(window.WebSocket, ActualWS);
+
+    console.log("Telemetry monitor active: watching WebSocket packets.");
 })();
