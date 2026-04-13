@@ -153,6 +153,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 STATE_FILE = "telemetry_state.json"
 BASE_ALLOCATION = 200.0  # Initial Resource Units
 target_efficiency = 1.50 # Efficiency Set-Point
+MIN_SLA_THRESHOLD = 0.10
 
 # Global State Variables
 current_integrity = 0.0
@@ -160,6 +161,23 @@ session_start_integrity = 0.0
 signal_history = []
 operational_streak = 0
 current_allocation = BASE_ALLOCATION
+last_ping_ms = 0.0
+
+
+def compute_latency_adjusted_threshold(base_threshold, ping_ms):
+    """
+    Dynamic latency compensator:
+    If ping > 50ms, reduce threshold by (ping/1000) * 2.0.
+    """
+    base = float(base_threshold)
+    ping = max(0.0, float(ping_ms or 0.0))
+
+    if ping <= 50.0:
+        return round(base, 4)
+
+    reduction = (ping / 1000.0) * 2.0
+    adjusted = max(MIN_SLA_THRESHOLD, base - reduction)
+    return round(adjusted, 4)
 
 def load_system_state():
     global current_integrity, session_start_integrity, signal_history, operational_streak
@@ -181,7 +199,7 @@ def save_system_state():
         }, f)
 
 # --- DYNAMIC RISK & ALLOCATION ENGINE ---
-def calculate_resource_scaling(history, integrity):
+def calculate_resource_scaling(history, integrity, efficiency_target):
     """
     Implements Compensatory Scaling (Inverse Gain) to recover system balance.
     """
@@ -200,7 +218,7 @@ def calculate_resource_scaling(history, integrity):
 
     # 3. COMPENSATORY LOGIC (The Martingale Bypass)
     # If the last signal failed to reach the efficiency target:
-    if history[0] < target_efficiency:
+    if history[0] < efficiency_target:
         # Scale input to compensate for previous efficiency loss
         current_allocation *= 2.0 
         status = "🔄 COMPENSATING"
@@ -209,7 +227,31 @@ def calculate_resource_scaling(history, integrity):
         current_allocation = BASE_ALLOCATION
         status = "✅ NOMINAL_FLOW"
 
-    return status, current_allocation, target_efficiency
+    return status, current_allocation, efficiency_target
+
+
+@app.route('/ping', methods=['POST'])
+def update_ping():
+    """
+    Receive browser-measured ping in milliseconds.
+    Expected payload: { "ping_ms": <number> }
+    """
+    global last_ping_ms
+
+    data = request.get_json(force=True, silent=True) or {}
+    ping_ms = data.get("ping_ms")
+
+    try:
+        last_ping_ms = max(0.0, float(ping_ms))
+    except (TypeError, ValueError):
+        return jsonify({"status": "invalid_ping"}), 400
+
+    adjusted = compute_latency_adjusted_threshold(target_efficiency, last_ping_ms)
+    return jsonify({
+        "status": "ok",
+        "ping_ms": last_ping_ms,
+        "sla_threshold": adjusted,
+    })
 
 # --- TELEMETRY ROUTES ---
 
@@ -224,7 +266,14 @@ def process_telemetry():
     if not data: return jsonify({"status": "no_data"}), 400
 
     # Capture the Terminal Value (The Crash Point)
-    terminal_value = float(data.get('raw', 0.0))
+    terminal_value = float(data.get('raw', data.get('throughput_index', 0.0)))
+
+    # Optional direct ping update from telemetry payloads.
+    if "ping_ms" in data:
+        try:
+            globals()["last_ping_ms"] = max(0.0, float(data.get("ping_ms")))
+        except (TypeError, ValueError):
+            pass
     
     if not signal_history or terminal_value != signal_history[0]:
         signal_history.insert(0, terminal_value)
@@ -238,24 +287,40 @@ def process_telemetry():
             
         save_system_state()
 
-    status, allocation, target = calculate_resource_scaling(signal_history, current_integrity)
+    effective_threshold = compute_latency_adjusted_threshold(target_efficiency, last_ping_ms)
+    status, allocation, target = calculate_resource_scaling(
+        signal_history,
+        current_integrity,
+        effective_threshold,
+    )
 
     return jsonify({
         "status": status,
         "allocation_units": f"{allocation:,.0f} UGX",
         "target_set_point": f"{target}x",
+        "sla_threshold": target,
+        "ping_ms": round(last_ping_ms, 2),
         "streak": operational_streak
     })
 
 @app.route('/get_stats', methods=['GET'])
 def get_stats():
-    status, allocation, target = calculate_resource_scaling(signal_history, current_integrity)
+    effective_threshold = compute_latency_adjusted_threshold(target_efficiency, last_ping_ms)
+    status, allocation, target = calculate_resource_scaling(
+        signal_history,
+        current_integrity,
+        effective_threshold,
+    )
     return jsonify({
         "balance": f"{current_integrity:,.2f} UGX",
         "history": signal_history[:10],
         "decision": status,
+        "system_status": status,
         "next_stake": f"{allocation:,.0f} UGX",
+        "recommended_intensity": f"{allocation:,.0f} UGX",
         "next_exit": f"{target}x",
+        "sla_threshold": target,
+        "ping_ms": round(last_ping_ms, 2),
         "streak": operational_streak
     })
 

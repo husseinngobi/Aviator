@@ -1,10 +1,14 @@
+import { useEffect, useState } from "react";
 import { useMockStream } from "../hooks/useMockStream";
 import { formatNumber } from "../utils/formatNumber";
 import Panel from "../components/Panel";
 import StatCard from "../components/StatCard";
 import EventFeed from "../components/EventFeed";
+import TelemetryMonitor from "../components/TelemetryMonitor";
 
 function DashboardPage() {
+  const [telemetryAlert, setTelemetryAlert] = useState(null);
+
   const {
     connection,
     metrics,
@@ -17,6 +21,21 @@ function DashboardPage() {
     togglePause,
     clearFeed
   } = useMockStream();
+
+  useEffect(() => {
+    const onSlaThresholdReached = (e) => {
+      console.log("Telemetry Alert:", e.detail?.throughput_index);
+      setTelemetryAlert({
+        throughput: e.detail?.throughput_index,
+        time: new Date().toLocaleTimeString([], { hour12: false })
+      });
+    };
+
+    window.addEventListener("SLAThresholdReached", onSlaThresholdReached);
+    return () => {
+      window.removeEventListener("SLAThresholdReached", onSlaThresholdReached);
+    };
+  }, []);
 
   const exportSnapshot = () => {
     const payload = {
@@ -53,6 +72,11 @@ function DashboardPage() {
               {metrics.analysisReady ? "Analysis ready" : "Collecting samples"}
             </span>
             <span className="mini-pill muted">Last sync {lastSyncedAt}</span>
+            {telemetryAlert && (
+              <span className="mini-pill bad">
+                Alert {telemetryAlert.throughput} at {telemetryAlert.time}
+              </span>
+            )}
           </div>
         </div>
         <div className="hero-actions">
@@ -132,9 +156,7 @@ function DashboardPage() {
 
       <section className="content-grid single">
         <Panel title="Build Area" subtitle="Add your custom logic here">
-          <div className="placeholder-box">
-            <p>Drop in new components, hooks, services, or adapters as you build.</p>
-          </div>
+          <TelemetryMonitor />
         </Panel>
       </section>
     </main>

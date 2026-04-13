@@ -281,6 +281,68 @@ select {
   font-size: 0.88rem;
 }
 
+.telemetry-monitor {
+  border: 1px solid rgba(125, 166, 188, 0.2);
+  border-radius: 16px;
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+  transition: background-color 0.2s ease;
+}
+
+.telemetry-monitor.nominal {
+  background: rgba(88, 204, 2, 0.2);
+}
+
+.telemetry-monitor.recovery {
+  background: rgba(255, 174, 0, 0.24);
+}
+
+.telemetry-monitor.neutral {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.telemetry-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.telemetry-header h3 {
+  margin: 0;
+}
+
+.telemetry-status {
+  font-size: 0.8rem;
+  border: 1px solid rgba(125, 166, 188, 0.3);
+  border-radius: 999px;
+  padding: 5px 10px;
+}
+
+.telemetry-intensity-wrap {
+  display: grid;
+  gap: 6px;
+}
+
+.telemetry-label {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #9eb2bf;
+}
+
+.telemetry-intensity {
+  font-size: 2.4rem;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.telemetry-meta {
+  font-size: 0.84rem;
+  color: #b8c7d1;
+}
+
 @media (max-width: 980px) {
   .stats-grid,
   .content-grid,

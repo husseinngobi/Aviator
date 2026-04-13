@@ -9,6 +9,7 @@
     const ActualWS = window.WebSocket;
     const THRESHOLD_BYTES = 400;
     const SIGNAL_URL = "http://127.0.0.1:5000/signal";
+    let lastFinalizedSignature = null;
 
     function getPacketSize(payload) {
         if (typeof payload === "string") {
@@ -39,21 +40,68 @@
         }
     }
 
+    function extractFinalizedThroughputIndex(json) {
+        if (!json || typeof json !== "object") return null;
+
+        // Common finalization markers used by live stream payloads.
+        const isFinalized =
+            json.type === "f" ||
+            json.status === "crashed" ||
+            json.event === "finalized";
+
+        if (!isFinalized) return null;
+
+        const rawValue =
+            json.throughput_index ??
+            json.multiplier ??
+            json.value ??
+            json.v;
+
+        const numeric = Number(rawValue);
+        if (!Number.isFinite(numeric)) return null;
+        return numeric;
+    }
+
     window.WebSocket = function (...args) {
         const instance = new ActualWS(...args);
 
         instance.addEventListener("message", (event) => {
             const payload = event.data;
-            const size = getPacketSize(payload);
+            const packetSize = getPacketSize(payload);
             const json = tryParseJSON(payload);
+            const finalizedThroughputIndex = extractFinalizedThroughputIndex(json);
 
             // Optional marker support for systems that use a terminal-state packet flag.
             const hasTerminalMarker = Boolean(json && json.type === "f");
 
-            if (size > THRESHOLD_BYTES || hasTerminalMarker) {
+            if (finalizedThroughputIndex !== null) {
+                const signature = `${finalizedThroughputIndex}|${instance.url}`;
+
+                // Idempotency: do not resend duplicate finalized packets.
+                if (signature !== lastFinalizedSignature) {
+                    lastFinalizedSignature = signature;
+
+                    const signalPayload = {
+                        event: "THROUGHPUT_FINALIZED",
+                        raw: finalizedThroughputIndex,
+                        throughput_index: finalizedThroughputIndex,
+                        packet_size: packetSize,
+                        timestamp: Date.now(),
+                        source: instance.url
+                    };
+
+                    const beaconBody = JSON.stringify(signalPayload);
+                    navigator.sendBeacon(
+                        SIGNAL_URL,
+                        new Blob([beaconBody], { type: "application/json" })
+                    );
+                }
+            }
+
+            if (packetSize > THRESHOLD_BYTES || hasTerminalMarker) {
                 const detail = {
                     timestamp: performance.now(),
-                    weight: size,
+                    weight: packetSize,
                     source: instance.url,
                     marker: hasTerminalMarker ? "type:f" : "size-threshold"
                 };
@@ -63,7 +111,7 @@
                 const body = JSON.stringify({
                     event: "TERMINAL_STATE",
                     latency: detail.timestamp,
-                    packetSize: size,
+                    packetSize,
                     source: instance.url,
                     marker: detail.marker
                 });
@@ -75,7 +123,7 @@
                 new CustomEvent("TelemetryTick", {
                     detail: {
                         timestamp: performance.now(),
-                        size,
+                        size: packetSize,
                         source: instance.url
                     }
                 })
