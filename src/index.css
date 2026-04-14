@@ -39,6 +39,128 @@ select {
   margin: 0 auto;
 }
 
+.hud-header {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  padding: 14px 20px;
+  margin: -24px -24px 0;
+  background: linear-gradient(180deg, rgba(4, 10, 15, 0.95), rgba(4, 10, 15, 0.86));
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+.hud-metric-block {
+  display: grid;
+  gap: 6px;
+}
+
+.hud-label {
+  color: #9ec4d8;
+  letter-spacing: 0.12em;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+}
+
+.hud-value {
+  font-size: 4rem;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: #daedf8;
+}
+
+.hud-prediction {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.hud-stress-symbol {
+  font-size: 2.2rem;
+  line-height: 1;
+}
+
+.hud-stress-symbol.unstable {
+  filter: drop-shadow(0 0 8px rgba(255, 196, 64, 0.8));
+}
+
+.hud-stress-symbol.stable {
+  filter: drop-shadow(0 0 8px rgba(120, 255, 160, 0.7));
+}
+
+.hud-value.hud-icon {
+  letter-spacing: 0;
+  text-shadow: 0 0 22px currentColor;
+}
+
+.hud-value.good {
+  color: #aef79f;
+}
+
+.hud-value.bad {
+  color: #ff9b9b;
+}
+
+.calibration-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+}
+
+.calibration-badge.stable {
+  color: #b8d8ea;
+  background: rgba(132, 171, 194, 0.14);
+  border-color: rgba(132, 171, 194, 0.34);
+}
+
+@keyframes hudCalibratingPulse {
+  0% {
+    box-shadow: 0 0 0 rgba(255, 210, 80, 0.2);
+    border-color: rgba(255, 210, 80, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 18px rgba(255, 210, 80, 0.75);
+    border-color: rgba(255, 210, 80, 0.9);
+  }
+  100% {
+    box-shadow: 0 0 0 rgba(255, 210, 80, 0.2);
+    border-color: rgba(255, 210, 80, 0.3);
+  }
+}
+
+.calibration-badge.recalibrating {
+  color: #fff4ca;
+  background: rgba(255, 210, 80, 0.2);
+  border-color: rgba(255, 210, 80, 0.55);
+  animation: hudCalibratingPulse 1s ease-in-out infinite;
+}
+
+.telemetry-history-compact {
+  max-height: 46vh;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
+.hud-status-line {
+  margin-top: 0;
+}
+
+.hud-actions {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  min-width: 0;
+}
+
 .hero-card,
 .panel-card,
 .stat-card {
@@ -460,6 +582,19 @@ select {
   .reference-block,
   .telemetry-inline-grid {
     grid-template-columns: 1fr;
+  }
+
+  .hud-header {
+    grid-template-columns: 1fr;
+    margin: -24px -24px 0;
+  }
+
+  .hud-value {
+    font-size: 2.8rem;
+  }
+
+  .hud-actions {
+    grid-template-columns: 1fr 1fr;
   }
 
   .telemetry-history-row {

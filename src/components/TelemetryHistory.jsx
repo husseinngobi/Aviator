@@ -53,10 +53,27 @@ function dedupeByKey(items) {
 }
 
 function TelemetryHistory({ history, slaTarget }) {
-  const normalizedHistory = useMemo(
-    () => (Array.isArray(history) ? history.map((item) => normalizeEntry(item, slaTarget)) : []),
-    [history, slaTarget]
-  );
+  const normalizedHistory = useMemo(() => {
+    if (!Array.isArray(history)) return [];
+
+    const mapped = history.map((item, index) => ({
+      ...normalizeEntry(item, slaTarget),
+      __index: index
+    }));
+
+    mapped.sort((a, b) => {
+      const aTime = Number(new Date(a.timestamp || 0));
+      const bTime = Number(new Date(b.timestamp || 0));
+
+      if (Number.isFinite(aTime) && Number.isFinite(bTime) && aTime !== bTime) {
+        return bTime - aTime;
+      }
+
+      return a.__index - b.__index;
+    });
+
+    return mapped.map(({ __index, ...entry }) => entry);
+  }, [history, slaTarget]);
 
   const [entries, setEntries] = useState(normalizedHistory);
 

@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import json
 import os
+import time
 from datetime import datetime
 
 from integrity_monitor import GenericPacketSignatureMonitor, evaluate_integrity
@@ -26,6 +27,10 @@ class SystemController:
         kd=0.04,
         integral_limit=500.0,
         derivative_smoothing=0.35,
+        ema_alpha=0.25,
+        low_signal_trigger=2,
+        protective_target_factor=0.75,
+        min_target_threshold=1.0,
     ):
         if initial_set_point < 0:
             raise ValueError("initial_set_point must be >= 0")
@@ -57,6 +62,10 @@ class SystemController:
         self.kd = float(kd)
         self.integral_limit = float(integral_limit)
         self.derivative_smoothing = max(0.0, min(1.0, float(derivative_smoothing)))
+        self.ema_alpha = max(0.01, min(1.0, float(ema_alpha)))
+        self.low_signal_trigger = max(1, int(low_signal_trigger))
+        self.protective_target_factor = max(0.1, min(1.0, float(protective_target_factor)))
+        self.min_target_threshold = max(0.1, float(min_target_threshold))
 
         self.current_input = float(initial_set_point)
         self.last_efficiency = None
@@ -68,6 +77,12 @@ class SystemController:
         self.last_error = None
         self.last_derivative = 0.0
         self.last_pid_output = float(initial_set_point)
+        self.stability_ema = float(target_threshold)
+        self.consecutive_low_signal = 0
+        self.system_mode = "NOMINAL"
+        self.nominal_target = float(target_threshold)
+        self.adaptive_target = float(target_threshold)
+        self.risk_level = "LOW"
 
     def _clamp(self, value):
         value = max(self.min_input, float(value))
@@ -78,11 +93,46 @@ class SystemController:
     def _limit_integral(self, value):
         return max(-self.integral_limit, min(self.integral_limit, float(value)))
 
+    def _update_stability_ema(self, measurement):
+        self.stability_ema = (
+            (self.ema_alpha * float(measurement))
+            + ((1.0 - self.ema_alpha) * float(self.stability_ema))
+        )
+
+    def _update_resilience_mode(self, measurement):
+        if float(measurement) < self.signal_integrity_floor:
+            self.consecutive_low_signal += 1
+        else:
+            self.consecutive_low_signal = 0
+
+        if self.consecutive_low_signal >= self.low_signal_trigger:
+            self.system_mode = "PROTECTIVE"
+            reduced_target = self.nominal_target * self.protective_target_factor
+            self.adaptive_target = max(self.min_target_threshold, reduced_target)
+        else:
+            self.system_mode = "NOMINAL"
+            self.adaptive_target = self.nominal_target
+
+    def _derive_risk_level(self):
+        if self.system_mode == "PROTECTIVE":
+            return "HIGH"
+
+        ratio = (self.stability_ema / self.nominal_target) if self.nominal_target > 0 else 0.0
+        if ratio < 0.85:
+            return "HIGH"
+        if ratio < 1.0:
+            return "MEDIUM"
+        return "LOW"
+
     def update(self, efficiency_value, packet_guard=None, dt=1.0, packet_size=None):
         self.cycle += 1
         measurement = float(efficiency_value)
         self.last_efficiency = measurement
         packet_guard = packet_guard or {}
+
+        self._update_stability_ema(measurement)
+        self._update_resilience_mode(measurement)
+        self.risk_level = self._derive_risk_level()
 
         if self.system_halt:
             self.current_input = self.min_input
@@ -91,6 +141,9 @@ class SystemController:
                 "next_command_input": self.current_input,
                 "control_output": self.current_input,
                 "reason": "manual_reset_required",
+                "risk_level": self.risk_level,
+                "system_mode": self.system_mode,
+                "adaptive_target": self.adaptive_target,
             }
 
         if measurement < self.signal_integrity_floor:
@@ -111,6 +164,9 @@ class SystemController:
                 "control_output": self.current_input,
                 "reason": "packet_signature_stall",
                 "packet_signature": packet_guard.get("normalized_signature", "UNKNOWN"),
+                "risk_level": self.risk_level,
+                "system_mode": self.system_mode,
+                "adaptive_target": self.adaptive_target,
             }
 
         if self.power_saving_mode:
@@ -120,6 +176,9 @@ class SystemController:
                 "next_command_input": self.current_input,
                 "control_output": self.current_input,
                 "reason": "signal_integrity_low",
+                "risk_level": self.risk_level,
+                "system_mode": self.system_mode,
+                "adaptive_target": self.adaptive_target,
             }
 
         if self.cycle <= self.warmup_period:
@@ -130,7 +189,7 @@ class SystemController:
             state = "Warmup"
             reason = "warmup_baseline"
         else:
-            error = self.target_threshold - measurement
+            error = self.adaptive_target - measurement
             proportional = self.kp * error
             self.integral_term = self._limit_integral(self.integral_term + (error * dt))
             derivative = 0.0 if self.last_error is None else (error - self.last_error) / max(dt, 1e-6)
@@ -140,11 +199,11 @@ class SystemController:
             )
 
             pid_output = self.initial_set_point + proportional + (self.ki * self.integral_term) + (self.kd * smoothed_derivative)
-            pid_output *= self.compensatory_factor if measurement < self.target_threshold else 1.0
+            pid_output *= self.compensatory_factor if measurement < self.adaptive_target else 1.0
             self.last_error = error
             self.last_derivative = smoothed_derivative
-            state = "PID_Recovery" if measurement < self.target_threshold else "PID_Tracking"
-            reason = "compensating" if measurement < self.target_threshold else "nominal_reset"
+            state = "PID_Recovery" if measurement < self.adaptive_target else "PID_Tracking"
+            reason = "compensating" if measurement < self.adaptive_target else "nominal_reset"
 
         candidate = self._clamp(pid_output)
 
@@ -156,6 +215,9 @@ class SystemController:
                 "next_command_input": self.current_input,
                 "control_output": self.current_input,
                 "reason": "critical_load_limit_exceeded",
+                "risk_level": "HIGH",
+                "system_mode": "PROTECTIVE",
+                "adaptive_target": self.adaptive_target,
             }
 
         self.current_input = candidate
@@ -165,6 +227,9 @@ class SystemController:
             "next_command_input": self.current_input,
             "control_output": self.current_input,
             "reason": reason,
+            "risk_level": self.risk_level,
+            "system_mode": self.system_mode,
+            "adaptive_target": self.adaptive_target,
         }
 
     def reset(self):
@@ -178,6 +243,11 @@ class SystemController:
         self.last_error = None
         self.last_derivative = 0.0
         self.last_pid_output = self.initial_set_point
+        self.stability_ema = self.nominal_target
+        self.consecutive_low_signal = 0
+        self.system_mode = "NOMINAL"
+        self.adaptive_target = self.nominal_target
+        self.risk_level = "LOW"
 
     def get_state(self):
         return {
@@ -197,6 +267,12 @@ class SystemController:
             "integral_term": self.integral_term,
             "last_error": self.last_error,
             "last_pid_output": self.last_pid_output,
+            "stability_ema": self.stability_ema,
+            "consecutive_low_signal": self.consecutive_low_signal,
+            "system_mode": self.system_mode,
+            "risk_level": self.risk_level,
+            "nominal_target": self.nominal_target,
+            "adaptive_target": self.adaptive_target,
         }
 
 app = Flask(__name__)
@@ -216,6 +292,8 @@ signal_history = telemetry_history
 operational_streak = 0
 current_allocation = BASE_ALLOCATION
 last_ping_ms = 0.0
+last_packet_arrival_ms = None
+last_inter_packet_delta_ms = 0.0
 packet_monitor = GenericPacketSignatureMonitor()
 controller = SystemController(
     initial_set_point=BASE_ALLOCATION,
@@ -246,7 +324,7 @@ def compute_latency_adjusted_threshold(base_threshold, ping_ms):
     return round(adjusted, 4)
 
 def load_system_state():
-    global current_integrity, session_start_integrity, telemetry_history, operational_streak, last_ping_ms
+    global current_integrity, session_start_integrity, telemetry_history, operational_streak, last_ping_ms, last_inter_packet_delta_ms
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r") as f:
@@ -255,6 +333,7 @@ def load_system_state():
                 telemetry_history[:] = data.get("telemetry_history", data.get("history", []))
                 operational_streak = data.get("streak", 0)
                 last_ping_ms = data.get("ping_ms", 0.0)
+                last_inter_packet_delta_ms = float(data.get("last_inter_packet_delta_ms", 0.0) or 0.0)
                 controller_state = data.get("controller_state", {})
                 controller.current_input = float(controller_state.get("current_input", controller.current_input))
                 controller.last_efficiency = controller_state.get("last_efficiency", controller.last_efficiency)
@@ -265,6 +344,12 @@ def load_system_state():
                 controller.integral_term = float(controller_state.get("integral_term", controller.integral_term))
                 controller.last_error = controller_state.get("last_error", controller.last_error)
                 controller.last_pid_output = float(controller_state.get("last_pid_output", controller.last_pid_output))
+                controller.stability_ema = float(controller_state.get("stability_ema", controller.stability_ema))
+                controller.consecutive_low_signal = int(controller_state.get("consecutive_low_signal", controller.consecutive_low_signal))
+                controller.system_mode = str(controller_state.get("system_mode", controller.system_mode))
+                controller.risk_level = str(controller_state.get("risk_level", controller.risk_level))
+                controller.nominal_target = float(controller_state.get("nominal_target", controller.nominal_target))
+                controller.adaptive_target = float(controller_state.get("adaptive_target", controller.adaptive_target))
         except Exception as e: print(f"Init Error: {e}")
 
 def save_system_state():
@@ -275,8 +360,33 @@ def save_system_state():
             "history": telemetry_history,
             "streak": operational_streak,
             "ping_ms": last_ping_ms,
+            "last_inter_packet_delta_ms": last_inter_packet_delta_ms,
             "controller_state": controller.get_state(),
         }, f)
+
+
+def _is_latency_spike(delta_ms):
+    try:
+        return float(delta_ms) > 15.0
+    except (TypeError, ValueError):
+        return False
+
+
+def derive_calibration_status(sensor_value, sla_threshold, controller_result):
+    """Return calibration status label for HUD display."""
+    try:
+        measured = float(sensor_value)
+        target = float(sla_threshold)
+    except (TypeError, ValueError):
+        measured = 0.0
+        target = 0.0
+
+    state = str((controller_result or {}).get("state", ""))
+    reason = str((controller_result or {}).get("reason", ""))
+    missed_round = measured < target if target > 0 else False
+    recalibrating = missed_round and (state == "PID_Recovery" or reason == "compensating")
+
+    return "RECALIBRATING..." if recalibrating else "CALIBRATED"
 
 
 def recursive_numeric_correction(payload, candidate_keys=("sensor_value", "throughput_index", "value", "raw", "reading"), depth=0, max_depth=4):
@@ -394,7 +504,19 @@ def _build_history_record(data, sensor_value, packet_signature, packet_size, pac
         "control_output": round(float(controller_result.get("control_output", controller_result.get("next_command_input", 0.0))), 6),
         "controller_state": controller_result.get("state", "PID_TRACKING"),
         "controller_reason": controller_result.get("reason", "unknown"),
+        "risk_level": controller_result.get("risk_level", controller.risk_level),
+        "system_mode": controller_result.get("system_mode", controller.system_mode),
+        "adaptive_target": round(float(controller_result.get("adaptive_target", controller.adaptive_target)), 6),
         "packet_signature_count": packet_guard.get("signature_count", 0),
+        "packet_arrival_delta_ms": round(float(last_inter_packet_delta_ms), 3),
+        "latency_spike": _is_latency_spike(last_inter_packet_delta_ms),
+        "stress_symbol": packet_guard.get("stress_symbol", "✅"),
+        "stress_status": packet_guard.get("stress_status", "STABLE"),
+        "calibration_status": derive_calibration_status(
+            sensor_value,
+            data.get("sla_threshold", target_efficiency),
+            controller_result,
+        ),
     }
 
 # --- TELEMETRY ROUTES ---
@@ -405,9 +527,17 @@ def process_telemetry():
     High-speed endpoint for telemetry interception.
     """
     global telemetry_history, operational_streak, current_integrity, current_allocation
+    global last_packet_arrival_ms, last_inter_packet_delta_ms
     
     data = request.get_json(force=True, silent=True) or {}
     if not data: return jsonify({"status": "no_data"}), 400
+
+    now_ms = time.perf_counter() * 1000.0
+    if last_packet_arrival_ms is None:
+        last_inter_packet_delta_ms = 0.0
+    else:
+        last_inter_packet_delta_ms = max(0.0, now_ms - float(last_packet_arrival_ms))
+    last_packet_arrival_ms = now_ms
 
     sensor_value = recursive_numeric_correction(data)
     if sensor_value is None:
@@ -427,6 +557,7 @@ def process_telemetry():
         throughput_index=sensor_value,
         packet_signature=packet_signature,
         packet_size=packet_size,
+        time_delta=last_inter_packet_delta_ms,
     )
 
     controller_result = controller.update(
@@ -462,6 +593,12 @@ def process_telemetry():
         controller_result,
     )
 
+    telemetry_record["calibration_status"] = derive_calibration_status(
+        sensor_value,
+        effective_threshold,
+        controller_result,
+    )
+
     telemetry_history.insert(0, telemetry_record)
     if len(telemetry_history) > 500:
         telemetry_history.pop()
@@ -483,6 +620,14 @@ def process_telemetry():
         "streak": operational_streak,
         "packet_signature": packet_guard.get("normalized_signature", packet_signature),
         "packet_monitor_status": packet_guard.get("status", "SYSTEM_ACTIVE"),
+        "risk_level": controller_result.get("risk_level", controller.risk_level),
+        "system_mode": controller_result.get("system_mode", controller.system_mode),
+        "adaptive_target": round(float(controller_result.get("adaptive_target", controller.adaptive_target)), 6),
+        "packet_arrival_delta_ms": round(float(last_inter_packet_delta_ms), 3),
+        "latency_spike": _is_latency_spike(last_inter_packet_delta_ms),
+        "stress_symbol": packet_guard.get("stress_symbol", "✅"),
+        "stress_status": packet_guard.get("stress_status", "STABLE"),
+        "calibration_status": telemetry_record.get("calibration_status", "CALIBRATED"),
         "control_output": round(current_allocation, 6),
         "telemetry_history": telemetry_history,
         "history": telemetry_history,
@@ -500,6 +645,23 @@ def get_stats():
         target = float(effective_threshold)
         packet_status = latest_record.get("monitor_status", "SYSTEM_ACTIVE")
         packet_signature = latest_record.get("normalized_signature", "UNKNOWN")
+        packet_arrival_delta_ms = float(latest_record.get("packet_arrival_delta_ms", last_inter_packet_delta_ms) or 0.0)
+        latency_spike = bool(latest_record.get("latency_spike", _is_latency_spike(packet_arrival_delta_ms)))
+        risk_level = str(latest_record.get("risk_level", controller.risk_level))
+        system_mode = str(latest_record.get("system_mode", controller.system_mode))
+        adaptive_target = float(latest_record.get("adaptive_target", controller.adaptive_target) or controller.adaptive_target)
+        stress_symbol = str(latest_record.get("stress_symbol", "✅"))
+        stress_status = str(latest_record.get("stress_status", "UNSTABLE" if latency_spike else "STABLE"))
+        calibration_status = str(
+            latest_record.get(
+                "calibration_status",
+                derive_calibration_status(
+                    latest_record.get("sensor_value", current_integrity),
+                    effective_threshold,
+                    {"state": status, "reason": latest_record.get("controller_reason", "")},
+                ),
+            )
+        )
     else:
         status, allocation, target = calculate_resource_scaling(
             telemetry_history,
@@ -508,6 +670,14 @@ def get_stats():
         )
         packet_status = "SYSTEM_ACTIVE"
         packet_signature = "UNKNOWN"
+        packet_arrival_delta_ms = float(last_inter_packet_delta_ms or 0.0)
+        latency_spike = _is_latency_spike(packet_arrival_delta_ms)
+        risk_level = str(controller.risk_level)
+        system_mode = str(controller.system_mode)
+        adaptive_target = float(controller.adaptive_target)
+        stress_symbol = "⚠️" if latency_spike else "✅"
+        stress_status = "UNSTABLE" if latency_spike else "STABLE"
+        calibration_status = derive_calibration_status(current_integrity, effective_threshold, {"state": status, "reason": ""})
 
     return jsonify({
         "balance": f"{current_integrity:,.2f} UGX",
@@ -523,6 +693,14 @@ def get_stats():
         "streak": operational_streak,
         "packet_monitor_status": packet_status,
         "packet_signature": packet_signature,
+        "risk_level": risk_level,
+        "system_mode": system_mode,
+        "adaptive_target": round(adaptive_target, 6),
+        "packet_arrival_delta_ms": round(packet_arrival_delta_ms, 3),
+        "latency_spike": latency_spike,
+        "stress_symbol": stress_symbol,
+        "stress_status": stress_status,
+        "calibration_status": calibration_status,
         "control_output": round(allocation, 6),
         "controller_state": controller.get_state(),
         "packet_monitor": packet_monitor.snapshot(),

@@ -32,6 +32,11 @@ export function useMockStream() {
   const [analysisReady, setAnalysisReady] = useState(false);
   const [samples, setSamples] = useState(0);
   const [slaTarget, setSlaTarget] = useState(1.5);
+  const [riskLevel, setRiskLevel] = useState("LOW");
+  const [systemMode, setSystemMode] = useState("NOMINAL");
+  const [stressSymbol, setStressSymbol] = useState("✅");
+  const [stressStatus, setStressStatus] = useState("STABLE");
+  const [calibrationStatus, setCalibrationStatus] = useState("CALIBRATED");
   const [uiSyncLocked, setUiSyncLocked] = useState(false);
   const [uiSyncLockReason, setUiSyncLockReason] = useState(null);
   const [isPaused, setIsPaused] = useState(false);
@@ -47,6 +52,42 @@ export function useMockStream() {
     }
   ]);
   const lastTerminalKeyRef = useRef(null);
+  const lastLatencyRef = useRef(null);
+
+  const emitJitterAnomalyIfNeeded = (latencyMs) => {
+    const previous = lastLatencyRef.current;
+    lastLatencyRef.current = latencyMs;
+
+    if (previous === null || previous === undefined) return;
+
+    const delta = Math.abs(latencyMs - previous);
+    if (delta > 15) {
+      window.dispatchEvent(
+        new CustomEvent("JITTER_ANOMALY", {
+          detail: {
+            latency_ms: latencyMs,
+            previous_latency_ms: previous,
+            jitter_delta_ms: delta,
+            timestamp: Date.now()
+          }
+        })
+      );
+    }
+  };
+
+  const emitServerLatencySpikeIfNeeded = (data) => {
+    if (!data || !data.latency_spike) return;
+
+    window.dispatchEvent(
+      new CustomEvent("JITTER_ANOMALY", {
+        detail: {
+          latency_spike: true,
+          packet_arrival_delta_ms: Number(data.packet_arrival_delta_ms ?? 0),
+          timestamp: Date.now()
+        }
+      })
+    );
+  };
 
   const emitTerminalStateIfNew = (data, telemetryRows) => {
     if (!Array.isArray(telemetryRows) || telemetryRows.length === 0) return;
@@ -111,7 +152,9 @@ export function useMockStream() {
 
         setMessages((count) => count + 1);
         setErrors(0);
-        setLatency(Math.max(12, Math.round(performance.now() - started)));
+        const nextLatency = Math.max(12, Math.round(performance.now() - started));
+        setLatency(nextLatency);
+        emitJitterAnomalyIfNeeded(nextLatency);
         setUptime(Math.floor((Date.now() - start) / 1000));
         setBalance(toNumber(data.balance));
         setProfit(toNumber(data.profit));
@@ -119,9 +162,15 @@ export function useMockStream() {
         setStreak(Number(data.streak ?? 0));
         setAnalysisReady(Boolean(data.analysis_ready));
         setSamples(Number(data.samples ?? 0));
+        setRiskLevel(String(data.risk_level ?? "LOW"));
+        setSystemMode(String(data.system_mode ?? "NOMINAL"));
+        setStressSymbol(String(data.stress_symbol ?? "✅"));
+        setStressStatus(String(data.stress_status ?? "STABLE"));
+        setCalibrationStatus(String(data.calibration_status ?? "CALIBRATED"));
         const telemetryRows = safeHistory(data.telemetry_history ?? data.history);
         setHistory(telemetryRows);
         setSlaTarget(toFloat(data.sla_threshold, 1.5));
+        emitServerLatencySpikeIfNeeded(data);
         emitTerminalStateIfNew(data, telemetryRows);
         setLastSyncedAt(buildTimeLabel(new Date()));
 
@@ -139,7 +188,9 @@ export function useMockStream() {
         if (!mounted) return;
 
         setErrors((count) => count + 1);
-        setLatency(Math.max(12, Math.round(performance.now() - started)));
+        const nextLatency = Math.max(12, Math.round(performance.now() - started));
+        setLatency(nextLatency);
+        emitJitterAnomalyIfNeeded(nextLatency);
         setUptime(Math.floor((Date.now() - start) / 1000));
         setEvents((current) => [
           {
@@ -182,7 +233,9 @@ export function useMockStream() {
 
       setMessages((count) => count + 1);
       setErrors(0);
-      setLatency(Math.max(12, Math.round(performance.now() - started)));
+      const nextLatency = Math.max(12, Math.round(performance.now() - started));
+      setLatency(nextLatency);
+      emitJitterAnomalyIfNeeded(nextLatency);
       setUptime((current) => current + 1);
       setBalance(toNumber(data.balance));
       setProfit(toNumber(data.profit));
@@ -190,9 +243,15 @@ export function useMockStream() {
       setStreak(Number(data.streak ?? 0));
       setAnalysisReady(Boolean(data.analysis_ready));
       setSamples(Number(data.samples ?? 0));
+      setRiskLevel(String(data.risk_level ?? "LOW"));
+      setSystemMode(String(data.system_mode ?? "NOMINAL"));
+      setStressSymbol(String(data.stress_symbol ?? "✅"));
+      setStressStatus(String(data.stress_status ?? "STABLE"));
+      setCalibrationStatus(String(data.calibration_status ?? "CALIBRATED"));
       const telemetryRows = safeHistory(data.telemetry_history ?? data.history);
       setHistory(telemetryRows);
       setSlaTarget(toFloat(data.sla_threshold, 1.5));
+      emitServerLatencySpikeIfNeeded(data);
       emitTerminalStateIfNew(data, telemetryRows);
       setLastSyncedAt(buildTimeLabel(new Date()));
 
@@ -208,7 +267,9 @@ export function useMockStream() {
       ].slice(0, 8));
     } catch (error) {
       setErrors((count) => count + 1);
-      setLatency(Math.max(12, Math.round(performance.now() - started)));
+      const nextLatency = Math.max(12, Math.round(performance.now() - started));
+      setLatency(nextLatency);
+      emitJitterAnomalyIfNeeded(nextLatency);
       setEvents((current) => [
         {
           id: Date.now(),
@@ -256,6 +317,11 @@ export function useMockStream() {
       analysisReady,
       samples,
       slaTarget,
+      riskLevel,
+      systemMode,
+      stressSymbol,
+      stressStatus,
+      calibrationStatus,
       uiSyncLocked,
       uiSyncLockReason
     },

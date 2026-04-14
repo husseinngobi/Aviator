@@ -6,6 +6,7 @@ import StatCard from "../components/StatCard";
 import EventFeed from "../components/EventFeed";
 import TelemetryMonitor from "../components/TelemetryMonitor";
 import TelemetryHistory from "../components/TelemetryHistory";
+import audioAlertService from "../services/AudioAlertService";
 
 function DashboardPage() {
   const [telemetryAlert, setTelemetryAlert] = useState(null);
@@ -26,7 +27,6 @@ function DashboardPage() {
   useEffect(() => {
     const onTelemetryAlert = (eventName) => (e) => {
       const detail = e.detail || {};
-      console.log(eventName, detail);
       setTelemetryAlert({
         label: eventName,
         throughput: detail.throughput_index,
@@ -40,9 +40,29 @@ function DashboardPage() {
 
     window.addEventListener("SLAThresholdReached", slaListener);
     window.addEventListener("PacketSignatureAlert", signatureListener);
+
     return () => {
       window.removeEventListener("SLAThresholdReached", slaListener);
       window.removeEventListener("PacketSignatureAlert", signatureListener);
+    };
+  }, []);
+
+  useEffect(() => {
+    const onJitterAnomaly = () => {
+      audioAlertService.playJitterWarningBeep();
+    };
+
+    const onSlaBreach = () => {
+      audioAlertService.playSlaBreachSolidTone();
+    };
+
+    window.addEventListener("JITTER_ANOMALY", onJitterAnomaly);
+    window.addEventListener("SLAThresholdReached", onSlaBreach);
+
+    return () => {
+      window.removeEventListener("JITTER_ANOMALY", onJitterAnomaly);
+      window.removeEventListener("SLAThresholdReached", onSlaBreach);
+      audioAlertService.stopAll();
     };
   }, []);
 
@@ -64,38 +84,67 @@ function DashboardPage() {
     URL.revokeObjectURL(link.href);
   };
 
+  const riskIndicator = metrics.uiSyncLocked
+    ? "LOCKED"
+    : String(metrics.riskLevel || "LOW").toUpperCase();
+
+  const isRecalibrating = String(metrics.calibrationStatus || "").toUpperCase() === "RECALIBRATING...";
+
+  const signalStabilityIcon =
+    riskIndicator === "LOW" ? "✅" : riskIndicator === "MEDIUM" ? "▲" : riskIndicator === "HIGH" ? "⚠️" : "■";
+
   return (
     <main className="dashboard-shell">
-      <header className="hero-card">
-        <div>
-          <p className="eyebrow">Real-Time Dashboard</p>
-          <h1>Stream Monitor Workspace</h1>
-          <p className="subtext">
-            Generic architecture for live events, metrics, and imported reference data.
-          </p>
-          <div className="status-line">
-            <span className={`mini-pill ${connection.online ? "good" : "bad"}`}>
-              {connection.online ? "Live" : "Offline"}
+      <header className="hud-header">
+        <div className="hud-metric-block">
+          <span className="hud-label">CURRENT_SLA_TARGET</span>
+          <strong className="hud-value hud-prediction">
+            {Number(metrics.slaTarget || 0).toFixed(2)}x
+            <span className={`hud-stress-symbol ${String(metrics.stressStatus || "").toUpperCase() === "UNSTABLE" ? "unstable" : "stable"}`}>
+              {metrics.stressSymbol || "✅"}
             </span>
-            <span className={`mini-pill ${metrics.analysisReady ? "good" : "muted"}`}>
-              {metrics.analysisReady ? "Analysis ready" : "Collecting samples"}
-            </span>
-            <span className={`mini-pill ${metrics.uiSyncLocked ? "bad" : "good"}`}>
-              {metrics.uiSyncLocked ? `UI Sync Locked (${metrics.uiSyncLockReason || "Alert"})` : "UI Sync Unlocked"}
-            </span>
-            <span className="mini-pill muted">Last sync {lastSyncedAt}</span>
-            <span className="mini-pill muted">History {history.length}</span>
-            {telemetryAlert && (
-              <span className="mini-pill bad">
-                {telemetryAlert.label} {telemetryAlert.signature || telemetryAlert.throughput} at {telemetryAlert.time}
-              </span>
-            )}
-          </div>
+          </strong>
+          <span className={`calibration-badge ${isRecalibrating ? "recalibrating" : "stable"}`}>
+            {isRecalibrating ? "RECALIBRATING..." : "CALIBRATED"}
+          </span>
         </div>
-        <div className="hero-actions">
-          <div className={`connection-badge ${connection.online ? "online" : "offline"}`}>
-            {connection.online ? "Connected" : "Disconnected"}
-          </div>
+
+        <div className="hud-metric-block">
+          <span className="hud-label">SIGNAL_STABILITY_ICON</span>
+          <strong className={`hud-value hud-icon ${riskIndicator === "NOMINAL" ? "good" : "bad"}`}>
+            {signalStabilityIcon}
+          </strong>
+          <span className="mini-pill muted">Mode {metrics.systemMode || "NOMINAL"}</span>
+        </div>
+      </header>
+
+      <section className="content-grid single">
+        <div className="telemetry-history-compact">
+          <TelemetryHistory history={history} slaTarget={metrics.slaTarget} />
+        </div>
+      </section>
+
+      <section className="content-grid single">
+        <div className="status-line hud-status-line">
+          <span className={`mini-pill ${connection.online ? "good" : "bad"}`}>
+            {connection.online ? "Live" : "Offline"}
+          </span>
+          <span className={`mini-pill ${metrics.analysisReady ? "good" : "muted"}`}>
+            {metrics.analysisReady ? "Analysis ready" : "Collecting samples"}
+          </span>
+          <span className={`mini-pill ${metrics.uiSyncLocked ? "bad" : "good"}`}>
+            {metrics.uiSyncLocked ? `UI Sync Locked (${metrics.uiSyncLockReason || "Alert"})` : "UI Sync Unlocked"}
+          </span>
+          <span className="mini-pill muted">Last sync {lastSyncedAt}</span>
+          <span className="mini-pill muted">History {history.length}</span>
+          {telemetryAlert && (
+            <span className="mini-pill bad">
+              {telemetryAlert.label} {telemetryAlert.signature || telemetryAlert.throughput} at {telemetryAlert.time}
+            </span>
+          )}
+        </div>
+
+        <div className="hero-actions hud-actions">
           <button className="ghost-button" type="button" onClick={refreshNow}>
             Refresh now
           </button>
@@ -109,7 +158,7 @@ function DashboardPage() {
             Clear feed
           </button>
         </div>
-      </header>
+      </section>
 
       <section className="stats-grid">
         <StatCard label="Messages" value={metrics.messages} helper="Live stream frames" />
@@ -164,12 +213,6 @@ function DashboardPage() {
               <span>Status: {metrics.analysisReady ? "Ready" : "Collecting"}</span>
             </div>
           </div>
-        </Panel>
-      </section>
-
-      <section className="content-grid single">
-        <Panel title="Telemetry History Mirror" subtitle="Exact backend telemetry_history payload">
-          <TelemetryHistory history={history} slaTarget={metrics.slaTarget} />
         </Panel>
       </section>
 

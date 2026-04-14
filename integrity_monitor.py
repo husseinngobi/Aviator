@@ -1,6 +1,6 @@
 from collections import Counter, deque
 from dataclasses import dataclass, field
-from statistics import pvariance
+from statistics import pstdev, pvariance
 
 
 DEFAULT_GENERIC_SIGNATURES = {
@@ -56,6 +56,78 @@ def evaluate_high_frequency_jitter(time_delta_history, time_delta, deviation_rat
     }
 
 
+def calculate_system_stress(time_delta_history, window_size=3, stress_growth_ratio=0.20):
+    """
+    Monitor standard deviation growth over two adjacent windows.
+
+    Rule:
+    - Compare the std-dev of the latest `window_size` packet intervals against
+      the prior `window_size` intervals.
+    - If std-dev increases by more than 20%, raise Stress_Sign = 'CRITICAL'.
+    """
+    samples = [float(x) for x in list(time_delta_history or []) if x is not None]
+    required = int(window_size) * 2
+
+    if len(samples) < required:
+        return {
+            "stress_sign": "NORMAL",
+            "baseline_stddev": 0.0,
+            "current_stddev": 0.0,
+            "stddev_growth_ratio": 0.0,
+            "window_size": int(window_size),
+            "sample_count": len(samples),
+        }
+
+    previous_window = samples[-required:-window_size]
+    current_window = samples[-window_size:]
+
+    baseline_stddev = float(pstdev(previous_window)) if len(previous_window) > 1 else 0.0
+    current_stddev = float(pstdev(current_window)) if len(current_window) > 1 else 0.0
+
+    if baseline_stddev > 0:
+        growth_ratio = (current_stddev - baseline_stddev) / baseline_stddev
+    else:
+        growth_ratio = 1.0 if current_stddev > 0 else 0.0
+
+    stress_sign = "CRITICAL" if growth_ratio > float(stress_growth_ratio) else "NORMAL"
+
+    return {
+        "stress_sign": stress_sign,
+        "baseline_stddev": round(baseline_stddev, 6),
+        "current_stddev": round(current_stddev, 6),
+        "stddev_growth_ratio": round(growth_ratio, 6),
+        "window_size": int(window_size),
+        "sample_count": len(samples),
+    }
+
+
+def generate_stress_symbol(time_delta_history, time_delta=None, deviation_ratio=0.15):
+    """
+    Generate a stress symbol from micro-stall detection.
+
+    - If jitter spikes are detected, return warning symbol and UNSTABLE status.
+    - Otherwise return clean symbol and STABLE status.
+    """
+    jitter = evaluate_high_frequency_jitter(
+        time_delta_history or [],
+        time_delta=time_delta,
+        deviation_ratio=deviation_ratio,
+    )
+
+    if jitter["jitter_exceeded"]:
+        return {
+            "symbol": "⚠️",
+            "status": "UNSTABLE",
+            "jitter_exceeded": True,
+        }
+
+    return {
+        "symbol": "✅",
+        "status": "STABLE",
+        "jitter_exceeded": False,
+    }
+
+
 def normalize_signature(signature):
     text = str(signature or "").strip().upper()
     if not text:
@@ -107,6 +179,12 @@ class GenericPacketSignatureMonitor:
             time_delta=delta,
             deviation_ratio=self.jitter_deviation_ratio,
         )
+        stress_symbol = generate_stress_symbol(
+            self.time_delta_history,
+            time_delta=delta,
+            deviation_ratio=self.jitter_deviation_ratio,
+        )
+        stress = calculate_system_stress(self.time_delta_history)
 
         samples = list(self.history)[-self.flatline_window :]
         variance_value = float(pvariance(samples)) if len(samples) >= 2 else 0.0
@@ -135,6 +213,12 @@ class GenericPacketSignatureMonitor:
             "average_time_delta": jitter["average_time_delta"],
             "latest_time_delta": jitter["latest_time_delta"],
             "jitter_deviation": jitter["jitter_deviation"],
+            "stress_symbol": stress_symbol["symbol"],
+            "stress_status": stress_symbol["status"],
+            "stress_sign": stress["stress_sign"],
+            "stress_baseline_stddev": stress["baseline_stddev"],
+            "stress_current_stddev": stress["current_stddev"],
+            "stress_growth_ratio": stress["stddev_growth_ratio"],
             "preemptive_shutdown": preemptive_shutdown,
             "sla_override": preemptive_shutdown,
             "sla_override_threshold": 0.0 if preemptive_shutdown else None,
@@ -204,6 +288,12 @@ def evaluate_integrity(
         time_delta=time_delta,
         deviation_ratio=jitter_deviation_ratio,
     )
+    stress_symbol = generate_stress_symbol(
+        time_delta_history or [],
+        time_delta=time_delta,
+        deviation_ratio=jitter_deviation_ratio,
+    )
+    stress = calculate_system_stress(time_delta_history or [])
     packet_dropout_hit = int(packet_size or 0) in dropout_set
     jitter_exceeded = bool(jitter["jitter_exceeded"])
 
@@ -226,6 +316,12 @@ def evaluate_integrity(
         "average_time_delta": jitter["average_time_delta"],
         "latest_time_delta": jitter["latest_time_delta"],
         "jitter_deviation": jitter["jitter_deviation"],
+        "stress_symbol": stress_symbol["symbol"],
+        "stress_status": stress_symbol["status"],
+        "stress_sign": stress["stress_sign"],
+        "stress_baseline_stddev": stress["baseline_stddev"],
+        "stress_current_stddev": stress["current_stddev"],
+        "stress_growth_ratio": stress["stddev_growth_ratio"],
         "preemptive_shutdown": preemptive_shutdown,
         "sla_override": preemptive_shutdown,
         "sla_override_threshold": 0.0 if preemptive_shutdown else None,
