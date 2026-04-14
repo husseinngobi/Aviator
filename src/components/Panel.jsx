@@ -1,3 +1,5 @@
+import React from "react";
+
 function Panel({ title, subtitle, children }) {
   return (
     <section className="panel-card">

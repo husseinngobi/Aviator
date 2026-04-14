@@ -12,7 +12,7 @@ function toNumber(value) {
 }
 
 function safeHistory(value) {
-  return Array.isArray(value) ? value.slice(0, 8) : [];
+  return Array.isArray(value) ? [...value] : [];
 }
 
 export function useMockStream() {
@@ -66,7 +66,7 @@ export function useMockStream() {
         setStreak(Number(data.streak ?? 0));
         setAnalysisReady(Boolean(data.analysis_ready));
         setSamples(Number(data.samples ?? 0));
-        setHistory(safeHistory(data.history));
+        setHistory(safeHistory(data.telemetry_history ?? data.history));
         setLastSyncedAt(buildTimeLabel(new Date()));
 
         setEvents((current) => [
@@ -130,7 +130,7 @@ export function useMockStream() {
       setStreak(Number(data.streak ?? 0));
       setAnalysisReady(Boolean(data.analysis_ready));
       setSamples(Number(data.samples ?? 0));
-      setHistory(safeHistory(data.history));
+      setHistory(safeHistory(data.telemetry_history ?? data.history));
       setLastSyncedAt(buildTimeLabel(new Date()));
 
       setEvents((current) => [
@@ -174,7 +174,7 @@ export function useMockStream() {
   };
 
   const reference = useMemo(() => ({
-    mode: "Live backend stats",
+    mode: "Live telemetry mirror",
     updatedAt: buildTimeLabel(new Date()),
     points: history.length
   }), [history.length]);

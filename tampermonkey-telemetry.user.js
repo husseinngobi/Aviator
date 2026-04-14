@@ -17,11 +17,19 @@
   const SIGNAL_URL = "http://127.0.0.1:5000/signal";
   const STATS_URL = "http://127.0.0.1:5000/get_stats";
   const HEAVY_PACKET_BYTES = 400;
+  const CRITICAL_SIGNATURES = new Set([
+    "CORRUPTED_FRAME",
+    "DROPPED_PACKET",
+    "EMPTY_SIGNATURE",
+    "FRAGMENTED_PACKET",
+    "REPEATED_HEADER"
+  ]);
 
   const state = {
     slaThreshold: 1.5,
     lastThroughput: null,
     lastPacketSize: 0,
+    lastPacketSignature: "UNKNOWN",
     lastPostedSignature: null,
     statusHit: false,
     badgeReady: false,
@@ -29,6 +37,7 @@
     rowSla: null,
     rowStatus: null,
     rowPkt: null,
+    rowSig: null,
     previousHitState: false
   };
 
@@ -99,6 +108,12 @@
     return parseNumeric(json.throughput_index ?? json.multiplier ?? json.value ?? json.v ?? null);
   }
 
+  function extractPacketSignature(json) {
+    if (!json || typeof json !== "object") return "UNKNOWN";
+    const candidate = json.packet_signature ?? json.signature ?? json.event ?? json.type ?? json.marker ?? json.status ?? "UNKNOWN";
+    return String(candidate).trim().toUpperCase().replace(/[-\s]+/g, "_") || "UNKNOWN";
+  }
+
   async function postSignal(payload) {
     try {
       await fetch(SIGNAL_URL, {
@@ -142,6 +157,7 @@
 
     state.rowSla.textContent = `SLA: ${threshold.toFixed(2)}`;
     state.rowPkt.textContent = `PKT: ${state.lastPacketSize} B`;
+    state.rowSig.textContent = `SIG: ${state.lastPacketSignature}`;
 
     if (hit) {
       state.rowStatus.textContent = "STATUS: HIT";
@@ -166,6 +182,13 @@
       state.rowStatus.style.color = "#39ff14";
       state.badge.style.boxShadow = "0 0 16px rgba(57,255,20,0.85), inset 0 0 12px rgba(57,255,20,0.28)";
       state.badge.style.borderColor = "#39ff14";
+    }
+
+    if (CRITICAL_SIGNATURES.has(state.lastPacketSignature)) {
+      state.rowStatus.textContent = "STATUS: SIGNATURE ALERT";
+      state.rowStatus.style.color = "#ff8a00";
+      state.badge.style.borderColor = "#ff8a00";
+      state.badge.style.boxShadow = "0 0 16px rgba(255,138,0,0.85), inset 0 0 12px rgba(255,138,0,0.28)";
     }
 
     state.previousHitState = hit;
@@ -244,6 +267,8 @@
     badge.appendChild(rowSla);
     badge.appendChild(rowStatus);
     badge.appendChild(rowPkt);
+    const rowSig = document.createElement("div");
+    badge.appendChild(rowSig);
 
     document.body.appendChild(badge);
 
@@ -264,6 +289,7 @@
     state.rowSla = rowSla;
     state.rowStatus = rowStatus;
     state.rowPkt = rowPkt;
+    state.rowSig = rowSig;
     state.badgeReady = true;
 
     updateOverlay();
@@ -280,22 +306,39 @@
 
       const json = parseJSON(raw);
       const throughput = extractThroughput(json);
+      const signature = extractPacketSignature(json);
       if (throughput !== null) {
         state.lastThroughput = throughput;
       }
+      state.lastPacketSignature = signature;
 
       if (size > HEAVY_PACKET_BYTES || (json && json.type === "f")) {
-        const sig = `${throughput ?? "na"}|${size}|${ws.url}`;
+        const sig = `${signature}|${throughput ?? "na"}|${size}|${ws.url}`;
         if (sig !== state.lastPostedSignature) {
           state.lastPostedSignature = sig;
           postSignal({
             event: "HEAVY_PACKET",
             throughput_index: throughput,
             packet_size: size,
+            packet_signature: signature,
             timestamp: Date.now(),
             source: ws.url
           });
         }
+      }
+
+      if (CRITICAL_SIGNATURES.has(signature)) {
+        window.dispatchEvent(
+          new CustomEvent("PacketSignatureAlert", {
+            detail: {
+              packet_signature: signature,
+              throughput_index: throughput,
+              packet_size: size,
+              timestamp: Date.now(),
+              source: ws.url
+            }
+          })
+        );
       }
 
       updateOverlay();

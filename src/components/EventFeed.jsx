@@ -1,3 +1,5 @@
+import React from "react";
+
 function EventFeed({ items }) {
   return (
     <div className="event-feed">

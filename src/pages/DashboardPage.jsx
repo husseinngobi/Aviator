@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useMockStream } from "../hooks/useMockStream";
 import { formatNumber } from "../utils/formatNumber";
 import Panel from "../components/Panel";
@@ -23,17 +23,25 @@ function DashboardPage() {
   } = useMockStream();
 
   useEffect(() => {
-    const onSlaThresholdReached = (e) => {
-      console.log("Telemetry Alert:", e.detail?.throughput_index);
+    const onTelemetryAlert = (eventName) => (e) => {
+      const detail = e.detail || {};
+      console.log(eventName, detail);
       setTelemetryAlert({
-        throughput: e.detail?.throughput_index,
+        label: eventName,
+        throughput: detail.throughput_index,
+        signature: detail.packet_signature,
         time: new Date().toLocaleTimeString([], { hour12: false })
       });
     };
 
-    window.addEventListener("SLAThresholdReached", onSlaThresholdReached);
+    const slaListener = onTelemetryAlert("SLAThresholdReached");
+    const signatureListener = onTelemetryAlert("PacketSignatureAlert");
+
+    window.addEventListener("SLAThresholdReached", slaListener);
+    window.addEventListener("PacketSignatureAlert", signatureListener);
     return () => {
-      window.removeEventListener("SLAThresholdReached", onSlaThresholdReached);
+      window.removeEventListener("SLAThresholdReached", slaListener);
+      window.removeEventListener("PacketSignatureAlert", signatureListener);
     };
   }, []);
 
@@ -72,9 +80,10 @@ function DashboardPage() {
               {metrics.analysisReady ? "Analysis ready" : "Collecting samples"}
             </span>
             <span className="mini-pill muted">Last sync {lastSyncedAt}</span>
+            <span className="mini-pill muted">History {history.length}</span>
             {telemetryAlert && (
               <span className="mini-pill bad">
-                Alert {telemetryAlert.throughput} at {telemetryAlert.time}
+                {telemetryAlert.label} {telemetryAlert.signature || telemetryAlert.throughput} at {telemetryAlert.time}
               </span>
             )}
           </div>
@@ -127,7 +136,7 @@ function DashboardPage() {
             </div>
             <div>
               <span className="ref-label">Recent Points</span>
-              <strong>{history.length ? history.join(", ") : "No history yet"}</strong>
+              <strong>{history.length ? `${history.length} mirrored entries` : "No history yet"}</strong>
             </div>
           </div>
         </Panel>
@@ -151,6 +160,12 @@ function DashboardPage() {
               <span>Status: {metrics.analysisReady ? "Ready" : "Collecting"}</span>
             </div>
           </div>
+        </Panel>
+      </section>
+
+      <section className="content-grid single">
+        <Panel title="Telemetry History Mirror" subtitle="Exact backend telemetry_history payload">
+          <pre className="history-mirror">{JSON.stringify(history, null, 2)}</pre>
         </Panel>
       </section>
 

@@ -1,3 +1,5 @@
+import React from "react";
+
 function StatCard({ label, value, helper }) {
   return (
     <article className="stat-card">

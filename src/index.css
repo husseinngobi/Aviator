@@ -290,6 +290,21 @@ select {
   transition: background-color 0.2s ease;
 }
 
+.telemetry-inline-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.telemetry-inline-grid > div {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(125, 166, 188, 0.12);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
 .telemetry-monitor.nominal {
   background: rgba(88, 204, 2, 0.2);
 }
@@ -343,10 +358,26 @@ select {
   color: #b8c7d1;
 }
 
+.history-mirror {
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(3, 10, 15, 0.75);
+  border: 1px solid rgba(125, 166, 188, 0.12);
+  color: #d7edf7;
+  font-size: 0.88rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 @media (max-width: 980px) {
   .stats-grid,
   .content-grid,
-  .reference-block {
+  .reference-block,
+  .telemetry-inline-grid {
     grid-template-columns: 1fr;
   }
 

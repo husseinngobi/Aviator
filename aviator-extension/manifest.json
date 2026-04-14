@@ -1,13 +1,30 @@
 {
   "manifest_version": 3,
-  "name": "WebSocket Monitor Bridge",
-  "version": "1.0",
-  "description": "Manual WebSocket monitoring scaffold for pages you choose to inspect.",
-  "permissions": ["activeTab", "scripting", "storage"],
+  "name": "WebSocket Telemetry Extension",
+  "version": "1.1",
+  "description": "Automatic WebSocket telemetry monitor for realtime dashboard ingestion.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "*://*/games/aviator*",
+    "http://127.0.0.1:5000/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Inject WebSocket Monitor"
-  }
+    "default_title": "Telemetry Monitor Active"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*/games/aviator*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["monitor.js"],
+      "matches": ["*://*/games/aviator*"]
+    }
+  ]
 }
