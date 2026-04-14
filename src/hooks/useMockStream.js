@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const API_URL = "http://127.0.0.1:5000";
 
@@ -9,6 +9,11 @@ function buildTimeLabel(date) {
 function toNumber(value) {
   const parsed = Number(String(value).replace(/[^0-9.-]/g, ""));
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function toFloat(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function safeHistory(value) {
@@ -26,6 +31,9 @@ export function useMockStream() {
   const [streak, setStreak] = useState(0);
   const [analysisReady, setAnalysisReady] = useState(false);
   const [samples, setSamples] = useState(0);
+  const [slaTarget, setSlaTarget] = useState(1.5);
+  const [uiSyncLocked, setUiSyncLocked] = useState(false);
+  const [uiSyncLockReason, setUiSyncLockReason] = useState(null);
   const [isPaused, setIsPaused] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState(buildTimeLabel(new Date()));
   const [history, setHistory] = useState([]);
@@ -38,13 +46,58 @@ export function useMockStream() {
       time: buildTimeLabel(new Date())
     }
   ]);
+  const lastTerminalKeyRef = useRef(null);
+
+  const emitTerminalStateIfNew = (data, telemetryRows) => {
+    if (!Array.isArray(telemetryRows) || telemetryRows.length === 0) return;
+
+    const latest = telemetryRows[0];
+    if (!latest || typeof latest !== "object") return;
+
+    const latestKey = String(
+      latest.timestamp ?? `${latest.sensor_value ?? "na"}-${latest.packet_signature ?? "na"}`
+    );
+
+    if (lastTerminalKeyRef.current === latestKey) return;
+    lastTerminalKeyRef.current = latestKey;
+
+    window.dispatchEvent(
+      new CustomEvent("NEW_TERMINAL_STATE", {
+        detail: {
+          ...latest,
+          sla_target: toFloat(latest.sla_target ?? data?.sla_threshold ?? 1.5, 1.5)
+        }
+      })
+    );
+  };
+
+  useEffect(() => {
+    const onUiSyncLock = (event) => {
+      const detail = event.detail || {};
+      setUiSyncLocked(true);
+      setUiSyncLockReason(String(detail.reason || "UI_SYNC_LOCK"));
+    };
+
+    const onUiSyncUnlock = () => {
+      setUiSyncLocked(false);
+      setUiSyncLockReason(null);
+    };
+
+    window.addEventListener("UI_SYNC_LOCK", onUiSyncLock);
+    window.addEventListener("UI_SYNC_UNLOCK", onUiSyncUnlock);
+
+    return () => {
+      window.removeEventListener("UI_SYNC_LOCK", onUiSyncLock);
+      window.removeEventListener("UI_SYNC_UNLOCK", onUiSyncUnlock);
+    };
+  }, []);
 
   useEffect(() => {
     const start = Date.now();
     let mounted = true;
 
     const sync = async () => {
-      if (isPaused) return;
+      if (isPaused || uiSyncLocked) return;
 
       const started = performance.now();
 
@@ -66,7 +119,10 @@ export function useMockStream() {
         setStreak(Number(data.streak ?? 0));
         setAnalysisReady(Boolean(data.analysis_ready));
         setSamples(Number(data.samples ?? 0));
-        setHistory(safeHistory(data.telemetry_history ?? data.history));
+        const telemetryRows = safeHistory(data.telemetry_history ?? data.history);
+        setHistory(telemetryRows);
+        setSlaTarget(toFloat(data.sla_threshold, 1.5));
+        emitTerminalStateIfNew(data, telemetryRows);
         setLastSyncedAt(buildTimeLabel(new Date()));
 
         setEvents((current) => [
@@ -105,9 +161,13 @@ export function useMockStream() {
       mounted = false;
       window.clearInterval(timer);
     };
-  }, [isPaused]);
+  }, [isPaused, uiSyncLocked]);
 
   const refreshNow = async () => {
+    if (uiSyncLocked) {
+      return;
+    }
+
     if (isPaused) {
       setIsPaused(false);
     }
@@ -130,7 +190,10 @@ export function useMockStream() {
       setStreak(Number(data.streak ?? 0));
       setAnalysisReady(Boolean(data.analysis_ready));
       setSamples(Number(data.samples ?? 0));
-      setHistory(safeHistory(data.telemetry_history ?? data.history));
+      const telemetryRows = safeHistory(data.telemetry_history ?? data.history);
+      setHistory(telemetryRows);
+      setSlaTarget(toFloat(data.sla_threshold, 1.5));
+      emitTerminalStateIfNew(data, telemetryRows);
       setLastSyncedAt(buildTimeLabel(new Date()));
 
       setEvents((current) => [
@@ -181,7 +244,21 @@ export function useMockStream() {
 
   return {
     connection: { online: errors === 0 },
-    metrics: { messages, errors, latency, uptime, balance, profit, decision, streak, analysisReady, samples },
+    metrics: {
+      messages,
+      errors,
+      latency,
+      uptime,
+      balance,
+      profit,
+      decision,
+      streak,
+      analysisReady,
+      samples,
+      slaTarget,
+      uiSyncLocked,
+      uiSyncLockReason
+    },
     events,
     reference,
     history,

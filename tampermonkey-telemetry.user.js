@@ -38,7 +38,9 @@
     rowStatus: null,
     rowPkt: null,
     rowSig: null,
-    previousHitState: false
+    previousHitState: false,
+    rafAlertOverlay: null,
+    rafAlertRunning: false
   };
 
   function injectRelayPulseStyles() {
@@ -58,8 +60,78 @@
         animation: tmCriticalStrobe 120ms linear infinite !important;
         outline: 2px solid #ff2b2b !important;
       }
+
+      #tm-raf-alert-indicator {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 2147483646;
+        box-sizing: border-box;
+        border: 10px solid rgba(255, 30, 30, 0);
+        box-shadow: inset 0 0 0 rgba(255, 30, 30, 0);
+        opacity: 0;
+      }
     `;
     document.head.appendChild(style);
+  }
+
+  function ensureRafAlertIndicator() {
+    if (state.rafAlertOverlay && document.body.contains(state.rafAlertOverlay)) {
+      return state.rafAlertOverlay;
+    }
+
+    if (!document.body) return null;
+
+    const overlay = document.createElement("div");
+    overlay.id = "tm-raf-alert-indicator";
+    document.body.appendChild(overlay);
+    state.rafAlertOverlay = overlay;
+    return overlay;
+  }
+
+  function broadcastUiSyncLock() {
+    const detail = {
+      lock: true,
+      reason: "SLA_THRESHOLD_REACHED",
+      timestamp: Date.now(),
+      throughput_index: state.lastThroughput,
+      sla_threshold: state.slaThreshold,
+      packet_signature: state.lastPacketSignature,
+      packet_size: state.lastPacketSize
+    };
+
+    window.dispatchEvent(new CustomEvent("UI_SYNC_LOCK", { detail }));
+    window.postMessage({ source: "tm-telemetry-monitor", type: "UI_SYNC_LOCK", detail }, "*");
+  }
+
+  function triggerRafAlertIndicator() {
+    const overlay = ensureRafAlertIndicator();
+    if (!overlay || state.rafAlertRunning) return;
+
+    state.rafAlertRunning = true;
+    const durationMs = 1200;
+    const startedAt = performance.now();
+
+    const animate = (now) => {
+      const elapsed = now - startedAt;
+      const progress = Math.min(1, elapsed / durationMs);
+      const pulse = Math.abs(Math.sin(progress * Math.PI * 8));
+
+      overlay.style.opacity = "1";
+      overlay.style.borderColor = `rgba(255, 30, 30, ${0.2 + pulse * 0.75})`;
+      overlay.style.boxShadow = `inset 0 0 ${22 + pulse * 18}px rgba(255, 30, 30, ${0.18 + pulse * 0.72})`;
+
+      if (progress < 1) {
+        requestAnimationFrame(animate);
+      } else {
+        overlay.style.opacity = "0";
+        overlay.style.borderColor = "rgba(255, 30, 30, 0)";
+        overlay.style.boxShadow = "inset 0 0 0 rgba(255, 30, 30, 0)";
+        state.rafAlertRunning = false;
+      }
+    };
+
+    requestAnimationFrame(animate);
   }
 
   function pulsePrimaryRelaySwitch() {
@@ -78,6 +150,8 @@
   function setupSlaPulseListener() {
     window.addEventListener("SLAThresholdReached", () => {
       pulsePrimaryRelaySwitch();
+      triggerRafAlertIndicator();
+      broadcastUiSyncLock();
     });
   }
 

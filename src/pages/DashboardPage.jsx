@@ -5,6 +5,7 @@ import Panel from "../components/Panel";
 import StatCard from "../components/StatCard";
 import EventFeed from "../components/EventFeed";
 import TelemetryMonitor from "../components/TelemetryMonitor";
+import TelemetryHistory from "../components/TelemetryHistory";
 
 function DashboardPage() {
   const [telemetryAlert, setTelemetryAlert] = useState(null);
@@ -78,6 +79,9 @@ function DashboardPage() {
             </span>
             <span className={`mini-pill ${metrics.analysisReady ? "good" : "muted"}`}>
               {metrics.analysisReady ? "Analysis ready" : "Collecting samples"}
+            </span>
+            <span className={`mini-pill ${metrics.uiSyncLocked ? "bad" : "good"}`}>
+              {metrics.uiSyncLocked ? `UI Sync Locked (${metrics.uiSyncLockReason || "Alert"})` : "UI Sync Unlocked"}
             </span>
             <span className="mini-pill muted">Last sync {lastSyncedAt}</span>
             <span className="mini-pill muted">History {history.length}</span>
@@ -165,7 +169,7 @@ function DashboardPage() {
 
       <section className="content-grid single">
         <Panel title="Telemetry History Mirror" subtitle="Exact backend telemetry_history payload">
-          <pre className="history-mirror">{JSON.stringify(history, null, 2)}</pre>
+          <TelemetryHistory history={history} slaTarget={metrics.slaTarget} />
         </Panel>
       </section>
 
