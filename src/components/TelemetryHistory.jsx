@@ -29,6 +29,7 @@ function normalizeEntry(entry, fallbackSlaTarget) {
 
   const confidenceScore = clamp(Math.round(100 - (pidVariance * 100)), 0, 100);
   const hitSlaTarget = finalThroughputIndex >= slaTarget;
+  const firstCrashTrap = finalThroughputIndex < 1.2;
 
   return {
     ...entry,
@@ -39,6 +40,7 @@ function normalizeEntry(entry, fallbackSlaTarget) {
     pid_variance: Number(pidVariance.toFixed(4)),
     confidence_score: confidenceScore,
     hit_sla_target: hitSlaTarget,
+    first_crash_trap: firstCrashTrap,
     sla_outcome: hitSlaTarget ? "SLA Met" : "SLA Breach",
     status_weight: hitSlaTarget ? "sla-met" : "sla-breach"
   };
@@ -114,6 +116,9 @@ function TelemetryHistory({ history, slaTarget }) {
             <strong>
               {entry.sla_outcome} | Final_Throughput_Index {entry.final_throughput_index.toFixed(3)} | Target {entry.sla_target.toFixed(3)}
             </strong>
+            {entry.first_crash_trap && (
+              <p className="trap-detected-label">⚠️ TRAP DETECTED | First-Crash Trap under 1.2x</p>
+            )}
             <p>
               Signature {entry.packet_signature || "UNKNOWN"} | PID Variance {entry.pid_variance.toFixed(4)}
             </p>
@@ -122,6 +127,7 @@ function TelemetryHistory({ history, slaTarget }) {
             <span className={`confidence-badge ${entry.status_weight}`}>
               {entry.sla_outcome}
             </span>
+            {entry.first_crash_trap && <span className="confidence-badge trap-badge">⚠️ TRAP DETECTED</span>}
             <time>{String(entry.timestamp ?? "--")}</time>
           </div>
         </article>

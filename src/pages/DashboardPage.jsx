@@ -152,7 +152,7 @@ function DashboardPage() {
       <header className="hud-header">
         <div className="hud-metric-block">
           <span className="hud-label">CURRENT_SLA_TARGET</span>
-          <strong className="hud-value hud-prediction">
+          <strong className="hud-value hud-prediction current-prediction">
             {Number(metrics.slaTarget || 0).toFixed(2)}x
             <span className={`hud-stress-symbol ${String(metrics.stressStatus || "").toUpperCase() === "UNSTABLE" ? "unstable" : "stable"}`}>
               {metrics.stressSymbol || "✅"}
