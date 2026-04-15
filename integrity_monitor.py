@@ -56,6 +56,41 @@ def evaluate_high_frequency_jitter(time_delta_history, time_delta, deviation_rat
     }
 
 
+def evaluate_packet_weight_compression(previous_packet_size, current_packet_size, time_delta_ms, compression_ratio=0.10, compression_window_ms=50.0):
+    """
+    Detect abrupt packet-weight compression.
+
+    A compression event is raised when the packet size changes by more than 10%
+    and the change lands within 50ms.
+    """
+    try:
+        previous = float(previous_packet_size)
+        current = float(current_packet_size)
+        delta_ms = float(time_delta_ms)
+    except (TypeError, ValueError):
+        return {
+            "packet_weight_compression": False,
+            "packet_weight_shift_ratio": 0.0,
+            "packet_weight_shift_ms": 0.0,
+        }
+
+    if previous <= 0.0 or current <= 0.0:
+        return {
+            "packet_weight_compression": False,
+            "packet_weight_shift_ratio": 0.0,
+            "packet_weight_shift_ms": round(max(0.0, delta_ms), 6),
+        }
+
+    shift_ratio = abs(current - previous) / max(previous, 1e-6)
+    compression_detected = shift_ratio > float(compression_ratio) and delta_ms < float(compression_window_ms)
+
+    return {
+        "packet_weight_compression": compression_detected,
+        "packet_weight_shift_ratio": round(shift_ratio, 6),
+        "packet_weight_shift_ms": round(max(0.0, delta_ms), 6),
+    }
+
+
 def calculate_system_stress(time_delta_history, window_size=3, stress_growth_ratio=0.20):
     """
     Monitor standard deviation growth over two adjacent windows.
@@ -128,6 +163,11 @@ def generate_stress_symbol(time_delta_history, time_delta=None, deviation_ratio=
     }
 
 
+def is_first_crash_signature(signature):
+    normalized = recursive_signature_correction(signature)
+    return normalized in {"FIRST_CRASH", "FIRST_CRASH_PACKET", "FIRST_CRASH_SIGNATURE"}
+
+
 def normalize_signature(signature):
     text = str(signature or "").strip().upper()
     if not text:
@@ -160,12 +200,15 @@ class GenericPacketSignatureMonitor:
     critical_dropout_packet_sizes: set[int] = field(default_factory=set)
     history: deque = field(default_factory=lambda: deque(maxlen=32))
     time_delta_history: deque = field(default_factory=lambda: deque(maxlen=10))
+    packet_size_history: deque = field(default_factory=lambda: deque(maxlen=10))
     signature_counts: Counter = field(default_factory=Counter)
 
     def observe(self, throughput_index, packet_signature=None, packet_size=0, time_delta=None):
         normalized_signature = recursive_signature_correction(packet_signature)
         self.signature_counts[normalized_signature] += 1
         self.history.append(float(throughput_index or 0.0))
+        previous_packet_size = self.packet_size_history[-1] if self.packet_size_history else None
+        self.packet_size_history.append(int(packet_size or 0))
 
         try:
             delta = float(time_delta) if time_delta is not None else None
@@ -185,6 +228,11 @@ class GenericPacketSignatureMonitor:
             deviation_ratio=self.jitter_deviation_ratio,
         )
         stress = calculate_system_stress(self.time_delta_history)
+        packet_compression = evaluate_packet_weight_compression(
+            previous_packet_size,
+            packet_size,
+            delta,
+        )
 
         samples = list(self.history)[-self.flatline_window :]
         variance_value = float(pvariance(samples)) if len(samples) >= 2 else 0.0
@@ -193,13 +241,23 @@ class GenericPacketSignatureMonitor:
         oversized_packet = int(packet_size or 0) >= int(self.packet_size_threshold)
         packet_dropout_hit = int(packet_size or 0) in self.critical_dropout_packet_sizes
         jitter_exceeded = bool(jitter["jitter_exceeded"])
+        first_crash_signature = is_first_crash_signature(normalized_signature)
 
-        preemptive_shutdown = jitter_exceeded or packet_dropout_hit
+        preemptive_shutdown = jitter_exceeded or packet_dropout_hit or packet_compression["packet_weight_compression"] or first_crash_signature
         if preemptive_shutdown:
             status = "PREEMPTIVE_SHUTDOWN"
+            if packet_compression["packet_weight_compression"]:
+                shutdown_reason = "packet_weight_compression"
+            elif first_crash_signature:
+                shutdown_reason = "first_crash_signature"
+            elif jitter_exceeded:
+                shutdown_reason = "jitter_exceeded"
+            else:
+                shutdown_reason = "packet_dropout"
         else:
             stalled = flatline_detected or signature_hit
             status = "SYSTEM_STALLED" if stalled else "SYSTEM_ACTIVE"
+            shutdown_reason = None
 
         return {
             "normalized_signature": normalized_signature,
@@ -210,6 +268,10 @@ class GenericPacketSignatureMonitor:
             "oversized_packet": oversized_packet,
             "packet_dropout_hit": packet_dropout_hit,
             "jitter_exceeded": jitter_exceeded,
+            "first_crash_signature": first_crash_signature,
+            "packet_weight_compression": packet_compression["packet_weight_compression"],
+            "packet_weight_shift_ratio": packet_compression["packet_weight_shift_ratio"],
+            "packet_weight_shift_ms": packet_compression["packet_weight_shift_ms"],
             "average_time_delta": jitter["average_time_delta"],
             "latest_time_delta": jitter["latest_time_delta"],
             "jitter_deviation": jitter["jitter_deviation"],
@@ -220,6 +282,7 @@ class GenericPacketSignatureMonitor:
             "stress_current_stddev": stress["current_stddev"],
             "stress_growth_ratio": stress["stddev_growth_ratio"],
             "preemptive_shutdown": preemptive_shutdown,
+            "shutdown_reason": shutdown_reason,
             "sla_override": preemptive_shutdown,
             "sla_override_threshold": 0.0 if preemptive_shutdown else None,
             "status": status,
@@ -250,6 +313,7 @@ def evaluate_integrity(
     time_delta=None,
     jitter_deviation_ratio=0.15,
     packet_size=0,
+    packet_size_history=None,
     critical_dropout_signatures=None,
 ):
     """
@@ -288,6 +352,7 @@ def evaluate_integrity(
         time_delta=time_delta,
         deviation_ratio=jitter_deviation_ratio,
     )
+    first_crash_signature = is_first_crash_signature(normalized_signature)
     stress_symbol = generate_stress_symbol(
         time_delta_history or [],
         time_delta=time_delta,
@@ -295,15 +360,27 @@ def evaluate_integrity(
     )
     stress = calculate_system_stress(time_delta_history or [])
     packet_dropout_hit = int(packet_size or 0) in dropout_set
+    size_history = list(packet_size_history or [])
+    previous_packet_size = size_history[-1] if size_history else None
+    packet_compression = evaluate_packet_weight_compression(previous_packet_size, packet_size, time_delta)
     jitter_exceeded = bool(jitter["jitter_exceeded"])
 
-    preemptive_shutdown = jitter_exceeded or packet_dropout_hit
+    preemptive_shutdown = jitter_exceeded or packet_dropout_hit or packet_compression["packet_weight_compression"] or first_crash_signature
     stalled = flatline_detected or signature_hit
 
     if preemptive_shutdown:
         status = "PREEMPTIVE_SHUTDOWN"
+        if packet_compression["packet_weight_compression"]:
+            shutdown_reason = "packet_weight_compression"
+        elif first_crash_signature:
+            shutdown_reason = "first_crash_signature"
+        elif jitter_exceeded:
+            shutdown_reason = "jitter_exceeded"
+        else:
+            shutdown_reason = "packet_dropout"
     else:
         status = "SYSTEM_STALLED" if stalled else "SYSTEM_ACTIVE"
+        shutdown_reason = None
 
     result = {
         "variance": round(variance_value, 6),
@@ -313,6 +390,10 @@ def evaluate_integrity(
         "normalized_signature": normalized_signature,
         "packet_dropout_hit": packet_dropout_hit,
         "jitter_exceeded": jitter_exceeded,
+        "first_crash_signature": first_crash_signature,
+        "packet_weight_compression": packet_compression["packet_weight_compression"],
+        "packet_weight_shift_ratio": packet_compression["packet_weight_shift_ratio"],
+        "packet_weight_shift_ms": packet_compression["packet_weight_shift_ms"],
         "average_time_delta": jitter["average_time_delta"],
         "latest_time_delta": jitter["latest_time_delta"],
         "jitter_deviation": jitter["jitter_deviation"],
@@ -323,6 +404,7 @@ def evaluate_integrity(
         "stress_current_stddev": stress["current_stddev"],
         "stress_growth_ratio": stress["stddev_growth_ratio"],
         "preemptive_shutdown": preemptive_shutdown,
+        "shutdown_reason": shutdown_reason,
         "sla_override": preemptive_shutdown,
         "sla_override_threshold": 0.0 if preemptive_shutdown else None,
         "status": status,

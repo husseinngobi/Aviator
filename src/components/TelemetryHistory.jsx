@@ -15,26 +15,32 @@ function buildEntryKey(entry) {
 
 function normalizeEntry(entry, fallbackSlaTarget) {
   const sensorValue = toFloat(entry?.sensor_value, 0);
+  const finalThroughputIndex = toFloat(
+    entry?.final_throughput_index ?? entry?.control_output ?? entry?.sensor_value,
+    sensorValue
+  );
   const slaTarget = toFloat(entry?.sla_target, toFloat(fallbackSlaTarget, 1.5));
   const pidVarianceRaw = entry?.pid_variance;
   const pidVariance = Number.isFinite(Number(pidVarianceRaw))
     ? Math.abs(Number(pidVarianceRaw))
     : Math.abs(slaTarget) > 0
-      ? Math.abs((slaTarget - sensorValue) / slaTarget)
+      ? Math.abs((slaTarget - finalThroughputIndex) / slaTarget)
       : Math.abs(toFloat(entry?.variance, 0));
 
   const confidenceScore = clamp(Math.round(100 - (pidVariance * 100)), 0, 100);
-  const hitSlaTarget = sensorValue >= slaTarget;
+  const hitSlaTarget = finalThroughputIndex >= slaTarget;
 
   return {
     ...entry,
     key: buildEntryKey(entry),
     sensor_value: sensorValue,
+    final_throughput_index: finalThroughputIndex,
     sla_target: slaTarget,
     pid_variance: Number(pidVariance.toFixed(4)),
     confidence_score: confidenceScore,
     hit_sla_target: hitSlaTarget,
-    status_weight: hitSlaTarget ? "green" : "red"
+    sla_outcome: hitSlaTarget ? "SLA Met" : "SLA Breach",
+    status_weight: hitSlaTarget ? "sla-met" : "sla-breach"
   };
 }
 
@@ -72,7 +78,7 @@ function TelemetryHistory({ history, slaTarget }) {
       return a.__index - b.__index;
     });
 
-    return mapped.map(({ __index, ...entry }) => entry);
+    return mapped.slice(0, 60).map(({ __index, ...entry }) => entry);
   }, [history, slaTarget]);
 
   const [entries, setEntries] = useState(normalizedHistory);
@@ -87,7 +93,7 @@ function TelemetryHistory({ history, slaTarget }) {
       if (!detail || typeof detail !== "object") return;
 
       const normalized = normalizeEntry(detail, slaTarget);
-      setEntries((current) => dedupeByKey([normalized, ...current]));
+      setEntries((current) => dedupeByKey([normalized, ...current]).slice(0, 60));
     };
 
     window.addEventListener("NEW_TERMINAL_STATE", onNewTerminalState);
@@ -106,7 +112,7 @@ function TelemetryHistory({ history, slaTarget }) {
         <article key={entry.key} className={`telemetry-history-row ${entry.status_weight}`}>
           <div className="telemetry-history-main">
             <strong>
-              {entry.hit_sla_target ? "SLA Hit" : "SLA Miss"} | Value {entry.sensor_value.toFixed(3)} | Target {entry.sla_target.toFixed(3)}
+              {entry.sla_outcome} | Final_Throughput_Index {entry.final_throughput_index.toFixed(3)} | Target {entry.sla_target.toFixed(3)}
             </strong>
             <p>
               Signature {entry.packet_signature || "UNKNOWN"} | PID Variance {entry.pid_variance.toFixed(4)}
@@ -114,7 +120,7 @@ function TelemetryHistory({ history, slaTarget }) {
           </div>
           <div className="telemetry-history-meta">
             <span className={`confidence-badge ${entry.status_weight}`}>
-              Confidence {entry.confidence_score}%
+              {entry.sla_outcome}
             </span>
             <time>{String(entry.timestamp ?? "--")}</time>
           </div>

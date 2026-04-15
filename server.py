@@ -389,6 +389,25 @@ def derive_calibration_status(sensor_value, sla_threshold, controller_result):
     return "RECALIBRATING..." if recalibrating else "CALIBRATED"
 
 
+def derive_ema_stability_score(controller_obj, packet_guard=None):
+    packet_guard = packet_guard or {}
+    nominal_target = float(getattr(controller_obj, "nominal_target", 0.0) or 0.0)
+    stability_ema = float(getattr(controller_obj, "stability_ema", 0.0) or 0.0)
+
+    if nominal_target <= 0.0:
+        return 0.0
+
+    score = (stability_ema / nominal_target) * 100.0
+    if packet_guard.get("preemptive_shutdown"):
+        score -= 12.5
+    if packet_guard.get("packet_weight_compression"):
+        score -= 7.5
+    if packet_guard.get("first_crash_signature"):
+        score -= 10.0
+
+    return round(max(0.0, min(100.0, score)), 2)
+
+
 def recursive_numeric_correction(payload, candidate_keys=("sensor_value", "throughput_index", "value", "raw", "reading"), depth=0, max_depth=4):
     """Recursively extract a numeric telemetry value from nested payloads."""
     if depth > max_depth:
@@ -494,6 +513,7 @@ def _build_history_record(data, sensor_value, packet_signature, packet_size, pac
     return {
         "timestamp": timestamp,
         "sensor_value": round(sensor_value, 6),
+        "final_throughput_index": round(float(sensor_value), 6),
         "packet_signature": packet_signature,
         "packet_size": int(packet_size),
         "normalized_signature": packet_guard.get("normalized_signature", "UNKNOWN"),
@@ -504,14 +524,20 @@ def _build_history_record(data, sensor_value, packet_signature, packet_size, pac
         "control_output": round(float(controller_result.get("control_output", controller_result.get("next_command_input", 0.0))), 6),
         "controller_state": controller_result.get("state", "PID_TRACKING"),
         "controller_reason": controller_result.get("reason", "unknown"),
+        "terminal_state": str(controller_result.get("state", "")).upper() in {"SYSTEMHALT", "PREEMPTIVE_SHUTDOWN"} or bool(packet_guard.get("preemptive_shutdown", False)),
         "risk_level": controller_result.get("risk_level", controller.risk_level),
         "system_mode": controller_result.get("system_mode", controller.system_mode),
         "adaptive_target": round(float(controller_result.get("adaptive_target", controller.adaptive_target)), 6),
         "packet_signature_count": packet_guard.get("signature_count", 0),
         "packet_arrival_delta_ms": round(float(last_inter_packet_delta_ms), 3),
         "latency_spike": _is_latency_spike(last_inter_packet_delta_ms),
+        "packet_monitor_status": packet_guard.get("status", "SYSTEM_ACTIVE"),
+        "packet_weight_compression": bool(packet_guard.get("packet_weight_compression", False)),
+        "preemptive_shutdown": bool(packet_guard.get("preemptive_shutdown", False)),
+        "preemptive_shutdown_reason": packet_guard.get("shutdown_reason"),
         "stress_symbol": packet_guard.get("stress_symbol", "✅"),
         "stress_status": packet_guard.get("stress_status", "STABLE"),
+        "ema_stability_score": derive_ema_stability_score(controller, packet_guard),
         "calibration_status": derive_calibration_status(
             sensor_value,
             data.get("sla_threshold", target_efficiency),
@@ -567,6 +593,17 @@ def process_telemetry():
         packet_size=packet_size,
     )
 
+    if packet_guard.get("preemptive_shutdown"):
+        controller_result = {
+            **controller_result,
+            "state": "PREEMPTIVE_SHUTDOWN",
+            "next_command_input": 0.0,
+            "control_output": 0.0,
+            "reason": packet_guard.get("shutdown_reason", "packet_weight_compression"),
+            "risk_level": "HIGH",
+            "system_mode": "PROTECTIVE",
+        }
+
     effective_threshold = compute_latency_adjusted_threshold(target_efficiency, last_ping_ms)
     integrity_result = evaluate_integrity(
         [item.get("sensor_value", 0.0) if isinstance(item, dict) else item for item in telemetry_history],
@@ -598,6 +635,7 @@ def process_telemetry():
         effective_threshold,
         controller_result,
     )
+    telemetry_record["ema_stability_score"] = derive_ema_stability_score(controller, packet_guard)
 
     telemetry_history.insert(0, telemetry_record)
     if len(telemetry_history) > 500:
@@ -620,6 +658,9 @@ def process_telemetry():
         "streak": operational_streak,
         "packet_signature": packet_guard.get("normalized_signature", packet_signature),
         "packet_monitor_status": packet_guard.get("status", "SYSTEM_ACTIVE"),
+        "preemptive_shutdown": bool(packet_guard.get("preemptive_shutdown", False)),
+        "preemptive_shutdown_reason": packet_guard.get("shutdown_reason"),
+        "packet_weight_compression": bool(packet_guard.get("packet_weight_compression", False)),
         "risk_level": controller_result.get("risk_level", controller.risk_level),
         "system_mode": controller_result.get("system_mode", controller.system_mode),
         "adaptive_target": round(float(controller_result.get("adaptive_target", controller.adaptive_target)), 6),
@@ -627,6 +668,7 @@ def process_telemetry():
         "latency_spike": _is_latency_spike(last_inter_packet_delta_ms),
         "stress_symbol": packet_guard.get("stress_symbol", "✅"),
         "stress_status": packet_guard.get("stress_status", "STABLE"),
+        "ema_stability_score": derive_ema_stability_score(controller, packet_guard),
         "calibration_status": telemetry_record.get("calibration_status", "CALIBRATED"),
         "control_output": round(current_allocation, 6),
         "telemetry_history": telemetry_history,
@@ -643,15 +685,17 @@ def get_stats():
         status = str(latest_record.get("controller_state", "PID_TRACKING"))
         allocation = float(latest_record.get("control_output", controller.current_input))
         target = float(effective_threshold)
-        packet_status = latest_record.get("monitor_status", "SYSTEM_ACTIVE")
+        packet_status = latest_record.get("packet_monitor_status", latest_record.get("monitor_status", "SYSTEM_ACTIVE"))
         packet_signature = latest_record.get("normalized_signature", "UNKNOWN")
         packet_arrival_delta_ms = float(latest_record.get("packet_arrival_delta_ms", last_inter_packet_delta_ms) or 0.0)
         latency_spike = bool(latest_record.get("latency_spike", _is_latency_spike(packet_arrival_delta_ms)))
+        preemptive_shutdown = bool(latest_record.get("preemptive_shutdown", False))
         risk_level = str(latest_record.get("risk_level", controller.risk_level))
         system_mode = str(latest_record.get("system_mode", controller.system_mode))
         adaptive_target = float(latest_record.get("adaptive_target", controller.adaptive_target) or controller.adaptive_target)
         stress_symbol = str(latest_record.get("stress_symbol", "✅"))
         stress_status = str(latest_record.get("stress_status", "UNSTABLE" if latency_spike else "STABLE"))
+        ema_stability_score = float(latest_record.get("ema_stability_score", derive_ema_stability_score(controller, latest_record)) or 0.0)
         calibration_status = str(
             latest_record.get(
                 "calibration_status",
@@ -672,11 +716,13 @@ def get_stats():
         packet_signature = "UNKNOWN"
         packet_arrival_delta_ms = float(last_inter_packet_delta_ms or 0.0)
         latency_spike = _is_latency_spike(packet_arrival_delta_ms)
+        preemptive_shutdown = False
         risk_level = str(controller.risk_level)
         system_mode = str(controller.system_mode)
         adaptive_target = float(controller.adaptive_target)
         stress_symbol = "⚠️" if latency_spike else "✅"
         stress_status = "UNSTABLE" if latency_spike else "STABLE"
+        ema_stability_score = derive_ema_stability_score(controller, {"preemptive_shutdown": latency_spike})
         calibration_status = derive_calibration_status(current_integrity, effective_threshold, {"state": status, "reason": ""})
 
     return jsonify({
@@ -693,13 +739,17 @@ def get_stats():
         "streak": operational_streak,
         "packet_monitor_status": packet_status,
         "packet_signature": packet_signature,
+        "preemptive_shutdown_reason": latest_record.get("preemptive_shutdown_reason") if isinstance(latest_record, dict) else None,
+        "packet_weight_compression": bool(latest_record.get("packet_weight_compression", False)) if isinstance(latest_record, dict) else False,
         "risk_level": risk_level,
         "system_mode": system_mode,
         "adaptive_target": round(adaptive_target, 6),
         "packet_arrival_delta_ms": round(packet_arrival_delta_ms, 3),
         "latency_spike": latency_spike,
+        "preemptive_shutdown": preemptive_shutdown,
         "stress_symbol": stress_symbol,
         "stress_status": stress_status,
+        "ema_stability_score": ema_stability_score,
         "calibration_status": calibration_status,
         "control_output": round(allocation, 6),
         "controller_state": controller.get_state(),

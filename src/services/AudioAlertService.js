@@ -4,7 +4,9 @@ class AudioAlertService {
     this.masterGain = null;
     this.activeNodes = [];
     this.lastWarningAt = 0;
+    this.lastCriticalAt = 0;
     this.warningCooldownMs = 700;
+    this.criticalCooldownMs = 900;
   }
 
   ensureContext() {
@@ -62,6 +64,25 @@ class AudioAlertService {
 
   playSlaBreachSolidTone() {
     this.playTone({ frequency: 880, durationMs: 500, type: "sawtooth", gain: 0.16 });
+  }
+
+  playCriticalRapidBeep() {
+    const now = Date.now();
+    if (now - this.lastCriticalAt < this.criticalCooldownMs) return;
+    this.lastCriticalAt = now;
+
+    const pattern = [
+      { frequency: 980, offset: 0 },
+      { frequency: 1120, offset: 110 },
+      { frequency: 980, offset: 220 },
+      { frequency: 1240, offset: 330 },
+    ];
+
+    for (const step of pattern) {
+      window.setTimeout(() => {
+        this.playTone({ frequency: step.frequency, durationMs: 80, type: "square", gain: 0.18 });
+      }, step.offset);
+    }
   }
 
   stopAll() {

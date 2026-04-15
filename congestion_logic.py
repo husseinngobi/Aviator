@@ -20,6 +20,10 @@ class CongestionManager:
         return float(current_value) > float(set_point)
 
 
+def _normalize_reconciliation_result(predicted, actual):
+    return reconcile_telemetry(predicted, actual)
+
+
 @dataclass
 class RiskRegistry:
     """Tracks packet-size risk signatures and returns standby allocation for blacklisted sizes."""
@@ -109,17 +113,75 @@ class PID_Controller:
     derivative_gain_step: float = 0.02
     safety_target_step: float = 0.05
     max_kd: float = 2.0
+    recovery_threshold_factor: float = 0.75
+    recovery_window: int = 3
 
     integral: float = 0.0
     last_error: float | None = None
     last_output: float = 0.0
     calibration_history: list[dict] = field(default_factory=list)
+    post_mortem_history: list[dict] = field(default_factory=list)
+    recovery_stance: bool = False
+    recovery_thresholds_remaining: int = 0
 
     def _clamp_target(self, value):
         return max(self.min_target_set_point, min(self.max_target_set_point, float(value)))
 
     def _clamp_integral(self, value):
         return max(-self.integral_limit, min(self.integral_limit, float(value)))
+
+    def _enter_recovery_stance(self):
+        self.recovery_stance = True
+        self.recovery_thresholds_remaining = int(self.recovery_window)
+
+    def _clear_recovery_stance(self):
+        self.recovery_stance = False
+        self.recovery_thresholds_remaining = 0
+
+    def next_sla_threshold(self, sla_threshold):
+        """Return the next SLA threshold, applying recovery stance if active."""
+        threshold = self._clamp_target(sla_threshold)
+        if self.recovery_stance and self.recovery_thresholds_remaining > 0:
+            threshold = self._clamp_target(threshold * self.recovery_threshold_factor)
+            self.recovery_thresholds_remaining -= 1
+            if self.recovery_thresholds_remaining <= 0:
+                self._clear_recovery_stance()
+        return threshold
+
+    def post_mortem_analysis_loop(self, predicted_exit, actual_index, sla_threshold):
+        """
+        Compare the prediction to the terminal result and enter recovery stance
+        when the actual result underperforms the prediction.
+
+        When recovery is activated, the next three SLA thresholds are reduced by
+        25% to protect the stream while stability returns.
+        """
+        reconciliation = _normalize_reconciliation_result(predicted_exit, actual_index)
+        terminal_state = float(actual_index) < float(predicted_exit)
+
+        if terminal_state and reconciliation["prediction_variance"] > 0:
+            self._enter_recovery_stance()
+
+        recovery_schedule = []
+        if self.recovery_stance:
+            remaining = int(self.recovery_thresholds_remaining or self.recovery_window)
+            for _ in range(remaining):
+                recovery_schedule.append(self._clamp_target(float(sla_threshold) * self.recovery_threshold_factor))
+
+        record = {
+            **reconciliation,
+            "terminal_state": terminal_state,
+            "recovery_stance": self.recovery_stance,
+            "recovery_thresholds_remaining": self.recovery_thresholds_remaining,
+            "recovery_schedule": recovery_schedule,
+            "sla_threshold": self._clamp_target(sla_threshold),
+        }
+
+        self.post_mortem_history.append(record)
+        if len(self.post_mortem_history) > 200:
+            self.post_mortem_history.pop(0)
+
+        return record
 
     def compute(self, actual_index, dt=1.0):
         """Run one PID step and return the recommended next target/output."""
@@ -159,6 +221,7 @@ class PID_Controller:
         reconciliation = reconcile_telemetry(predicted_exit, actual_index)
         variance = max(0.0, reconciliation["prediction_variance"])
         variance_ratio = max(0.0, reconciliation["prediction_variance_ratio"])
+        post_mortem = self.post_mortem_analysis_loop(predicted_exit, actual_index, self.target_set_point)
 
         if reconciliation["early_halt"]:
             kd_boost = self.derivative_gain_step * max(1.0, variance_ratio)
@@ -171,11 +234,15 @@ class PID_Controller:
         else:
             action = "stable_no_change"
 
+        if post_mortem["recovery_stance"] and post_mortem["recovery_schedule"]:
+            self.target_set_point = self.next_sla_threshold(self.target_set_point)
+
         calibration = {
             **reconciliation,
             "updated_kd": self.kd,
             "updated_target_set_point": self.target_set_point,
             "action": action,
+            "post_mortem": post_mortem,
         }
 
         self.calibration_history.append(calibration)

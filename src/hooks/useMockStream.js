@@ -34,9 +34,15 @@ export function useMockStream() {
   const [slaTarget, setSlaTarget] = useState(1.5);
   const [riskLevel, setRiskLevel] = useState("LOW");
   const [systemMode, setSystemMode] = useState("NOMINAL");
+  const [emaStabilityScore, setEmaStabilityScore] = useState(100);
   const [stressSymbol, setStressSymbol] = useState("✅");
   const [stressStatus, setStressStatus] = useState("STABLE");
   const [calibrationStatus, setCalibrationStatus] = useState("CALIBRATED");
+  const [packetMonitorStatus, setPacketMonitorStatus] = useState("SYSTEM_ACTIVE");
+  const [packetSignature, setPacketSignature] = useState("UNKNOWN");
+  const [packetWeightCompression, setPacketWeightCompression] = useState(false);
+  const [preemptiveShutdown, setPreemptiveShutdown] = useState(false);
+  const [shutdownReason, setShutdownReason] = useState(null);
   const [uiSyncLocked, setUiSyncLocked] = useState(false);
   const [uiSyncLockReason, setUiSyncLockReason] = useState(null);
   const [isPaused, setIsPaused] = useState(false);
@@ -53,6 +59,7 @@ export function useMockStream() {
   ]);
   const lastTerminalKeyRef = useRef(null);
   const lastLatencyRef = useRef(null);
+  const lastPreemptiveShutdownRef = useRef(false);
 
   const emitJitterAnomalyIfNeeded = (latencyMs) => {
     const previous = lastLatencyRef.current;
@@ -83,6 +90,30 @@ export function useMockStream() {
         detail: {
           latency_spike: true,
           packet_arrival_delta_ms: Number(data.packet_arrival_delta_ms ?? 0),
+          timestamp: Date.now()
+        }
+      })
+    );
+  };
+
+  const emitPreemptiveShutdownIfNeeded = (data) => {
+    const isPreemptive = Boolean(data && data.preemptive_shutdown);
+    if (!isPreemptive) {
+      lastPreemptiveShutdownRef.current = false;
+      return;
+    }
+
+    if (lastPreemptiveShutdownRef.current) return;
+    lastPreemptiveShutdownRef.current = true;
+
+    window.dispatchEvent(
+      new CustomEvent("PREEMPTIVE_SHUTDOWN", {
+        detail: {
+          preemptive_shutdown: true,
+          reason: String(data.preemptive_shutdown_reason || data.packet_monitor_status || "packet_weight_compression"),
+          packet_signature: String(data.packet_signature || "UNKNOWN"),
+          packet_arrival_delta_ms: Number(data.packet_arrival_delta_ms ?? 0),
+          packet_weight_compression: Boolean(data.packet_weight_compression),
           timestamp: Date.now()
         }
       })
@@ -164,12 +195,19 @@ export function useMockStream() {
         setSamples(Number(data.samples ?? 0));
         setRiskLevel(String(data.risk_level ?? "LOW"));
         setSystemMode(String(data.system_mode ?? "NOMINAL"));
+        setEmaStabilityScore(Number(data.ema_stability_score ?? 100));
         setStressSymbol(String(data.stress_symbol ?? "✅"));
         setStressStatus(String(data.stress_status ?? "STABLE"));
         setCalibrationStatus(String(data.calibration_status ?? "CALIBRATED"));
+        setPacketMonitorStatus(String(data.packet_monitor_status ?? "SYSTEM_ACTIVE"));
+        setPacketSignature(String(data.packet_signature ?? "UNKNOWN"));
+        setPacketWeightCompression(Boolean(data.packet_weight_compression));
+        setPreemptiveShutdown(Boolean(data.preemptive_shutdown));
+        setShutdownReason(data.preemptive_shutdown_reason ?? null);
         const telemetryRows = safeHistory(data.telemetry_history ?? data.history);
         setHistory(telemetryRows);
         setSlaTarget(toFloat(data.sla_threshold, 1.5));
+        emitPreemptiveShutdownIfNeeded(data);
         emitServerLatencySpikeIfNeeded(data);
         emitTerminalStateIfNew(data, telemetryRows);
         setLastSyncedAt(buildTimeLabel(new Date()));
@@ -245,12 +283,19 @@ export function useMockStream() {
       setSamples(Number(data.samples ?? 0));
       setRiskLevel(String(data.risk_level ?? "LOW"));
       setSystemMode(String(data.system_mode ?? "NOMINAL"));
+      setEmaStabilityScore(Number(data.ema_stability_score ?? 100));
       setStressSymbol(String(data.stress_symbol ?? "✅"));
       setStressStatus(String(data.stress_status ?? "STABLE"));
       setCalibrationStatus(String(data.calibration_status ?? "CALIBRATED"));
+      setPacketMonitorStatus(String(data.packet_monitor_status ?? "SYSTEM_ACTIVE"));
+      setPacketSignature(String(data.packet_signature ?? "UNKNOWN"));
+      setPacketWeightCompression(Boolean(data.packet_weight_compression));
+      setPreemptiveShutdown(Boolean(data.preemptive_shutdown));
+      setShutdownReason(data.preemptive_shutdown_reason ?? null);
       const telemetryRows = safeHistory(data.telemetry_history ?? data.history);
       setHistory(telemetryRows);
       setSlaTarget(toFloat(data.sla_threshold, 1.5));
+      emitPreemptiveShutdownIfNeeded(data);
       emitServerLatencySpikeIfNeeded(data);
       emitTerminalStateIfNew(data, telemetryRows);
       setLastSyncedAt(buildTimeLabel(new Date()));
@@ -319,9 +364,16 @@ export function useMockStream() {
       slaTarget,
       riskLevel,
       systemMode,
+      emaStabilityScore,
       stressSymbol,
       stressStatus,
       calibrationStatus,
+      packetMonitorStatus,
+      packetSignature,
+      packetWeightCompression,
+      preemptiveShutdown,
+      preemptiveShutdownReason: shutdownReason,
+      shutdownReason,
       uiSyncLocked,
       uiSyncLockReason
     },

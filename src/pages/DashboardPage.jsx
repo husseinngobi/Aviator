@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useMockStream } from "../hooks/useMockStream";
 import { formatNumber } from "../utils/formatNumber";
 import Panel from "../components/Panel";
@@ -10,6 +10,9 @@ import audioAlertService from "../services/AudioAlertService";
 
 function DashboardPage() {
   const [telemetryAlert, setTelemetryAlert] = useState(null);
+  const [stressPulse, setStressPulse] = useState(false);
+  const [shutdownImminent, setShutdownImminent] = useState(false);
+  const previousStressScoreRef = useRef(null);
 
   const {
     connection,
@@ -56,15 +59,62 @@ function DashboardPage() {
       audioAlertService.playSlaBreachSolidTone();
     };
 
+    const onPreemptiveShutdown = () => {
+      audioAlertService.playSlaBreachSolidTone();
+      setShutdownImminent(true);
+      window.setTimeout(() => setShutdownImminent(false), 1200);
+    };
+
     window.addEventListener("JITTER_ANOMALY", onJitterAnomaly);
     window.addEventListener("SLAThresholdReached", onSlaBreach);
+    window.addEventListener("PREEMPTIVE_SHUTDOWN", onPreemptiveShutdown);
 
     return () => {
       window.removeEventListener("JITTER_ANOMALY", onJitterAnomaly);
       window.removeEventListener("SLAThresholdReached", onSlaBreach);
+      window.removeEventListener("PREEMPTIVE_SHUTDOWN", onPreemptiveShutdown);
       audioAlertService.stopAll();
     };
   }, []);
+
+  useEffect(() => {
+    const currentScore = Number(metrics.emaStabilityScore ?? 100);
+    const previousScore = previousStressScoreRef.current;
+    previousStressScoreRef.current = currentScore;
+
+    if (!Number.isFinite(previousScore)) {
+      return;
+    }
+
+    const scoreDropped = currentScore < previousScore;
+    const hasFirstCrashSignature = String(metrics.packetSignature || "").toUpperCase().includes("FIRST_CRASH");
+    const isCritical = scoreDropped && (
+      currentScore <= 80 ||
+      metrics.packetWeightCompression ||
+      metrics.preemptiveShutdown ||
+      String(metrics.packetMonitorStatus || "").toUpperCase() === "PREEMPTIVE_SHUTDOWN" ||
+      hasFirstCrashSignature
+    );
+
+    if (!isCritical) {
+      return;
+    }
+
+    setStressPulse(true);
+    audioAlertService.playCriticalRapidBeep();
+
+    const timer = window.setTimeout(() => {
+      setStressPulse(false);
+    }, 900);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    metrics.emaStabilityScore,
+    metrics.packetWeightCompression,
+    metrics.preemptiveShutdown,
+    metrics.packetMonitorStatus,
+    metrics.packetSignature
+  ]);
 
   const exportSnapshot = () => {
     const payload = {
@@ -89,6 +139,10 @@ function DashboardPage() {
     : String(metrics.riskLevel || "LOW").toUpperCase();
 
   const isRecalibrating = String(metrics.calibrationStatus || "").toUpperCase() === "RECALIBRATING...";
+  const signalStressScore = Math.max(0, Math.min(100, Number(metrics.emaStabilityScore ?? 100)));
+  const signalStressCritical = stressPulse || signalStressScore <= 80 || metrics.preemptiveShutdown;
+  const showShutdownWarning = shutdownImminent || metrics.preemptiveShutdown || metrics.packetWeightCompression;
+  const latestHistoryEntry = Array.isArray(history) && history.length > 0 ? history[0] : null;
 
   const signalStabilityIcon =
     riskIndicator === "LOW" ? "✅" : riskIndicator === "MEDIUM" ? "▲" : riskIndicator === "HIGH" ? "⚠️" : "■";
@@ -111,17 +165,51 @@ function DashboardPage() {
 
         <div className="hud-metric-block">
           <span className="hud-label">SIGNAL_STABILITY_ICON</span>
-          <strong className={`hud-value hud-icon ${riskIndicator === "NOMINAL" ? "good" : "bad"}`}>
+          <strong className={`hud-value hud-icon ${riskIndicator === "LOW" ? "good" : "bad"}`}>
             {signalStabilityIcon}
           </strong>
           <span className="mini-pill muted">Mode {metrics.systemMode || "NOMINAL"}</span>
         </div>
+
+        <div className={`hud-metric-block signal-stress-gauge ${signalStressCritical ? "critical" : "normal"}`}>
+          <span className="hud-label">SIGNAL_STRESS_GAUGE</span>
+          <div className="signal-stress-readout">
+            <strong className="hud-value hud-gauge-value">{signalStressScore.toFixed(0)}%</strong>
+            <span className="mini-pill muted">EMA Stability Score</span>
+          </div>
+          <div className="signal-stress-track" aria-label="Signal stress gauge">
+            <span
+              className={`signal-stress-fill ${signalStressCritical ? "critical" : ""}`}
+              style={{ width: `${signalStressScore}%` }}
+            />
+          </div>
+        </div>
       </header>
 
-      <section className="content-grid single">
-        <div className="telemetry-history-compact">
-          <TelemetryHistory history={history} slaTarget={metrics.slaTarget} />
+      {showShutdownWarning && (
+        <div className="shutdown-imminent-banner">
+          SHUTDOWN IMMINENT
+          <span>
+            {metrics.preemptiveShutdownReason || (String(metrics.packetMonitorStatus || "").toUpperCase() === "PREEMPTIVE_SHUTDOWN"
+              ? "Packet weight compression detected"
+              : metrics.packetSignature || "First crash signature")}
+          </span>
         </div>
+      )}
+
+      <section className="content-grid single">
+        <Panel title="Telemetry Mirror" subtitle="Last 60 system events, newest first">
+          <div className="telemetry-history-header">
+            <span className="mini-pill muted">Pinned below HUD</span>
+            <span className="mini-pill muted">Visible rows {Math.min(history.length, 60)}</span>
+            <span className={`mini-pill ${latestHistoryEntry?.hit_sla_target ? "good" : "bad"}`}>
+              {latestHistoryEntry ? latestHistoryEntry.sla_outcome || (latestHistoryEntry.hit_sla_target ? "SLA Met" : "SLA Breach") : "Waiting for history"}
+            </span>
+          </div>
+          <div className="telemetry-history-compact">
+            <TelemetryHistory history={history} slaTarget={metrics.slaTarget} />
+          </div>
+        </Panel>
       </section>
 
       <section className="content-grid single">
