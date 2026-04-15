@@ -49,6 +49,8 @@ export function useMockStream() {
   const [isPaused, setIsPaused] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState(buildTimeLabel(new Date()));
   const [history, setHistory] = useState([]);
+  const [liveConnectionActive, setLiveConnectionActive] = useState(false);
+  const [liveConnectionStale, setLiveConnectionStale] = useState(false);
   const [events, setEvents] = useState([
     {
       id: 1,
@@ -62,6 +64,8 @@ export function useMockStream() {
   const lastLatencyRef = useRef(null);
   const lastPreemptiveShutdownRef = useRef(false);
   const lastPacketWeightRef = useRef(null);
+  const lastDataFetchRef = useRef(Date.now());
+  const staleTimeoutRef = useRef(null);
 
   const emitJitterAnomalyIfNeeded = (latencyMs) => {
     const previous = lastLatencyRef.current;
@@ -140,6 +144,29 @@ export function useMockStream() {
         detail: {
           ...latest,
           sla_target: toFloat(latest.sla_target ?? data?.sla_threshold ?? 1.5, 1.5)
+        }
+      })
+    );
+  };
+
+  const markLiveConnection = () => {
+    lastDataFetchRef.current = Date.now();
+    setLiveConnectionActive(true);
+    setLiveConnectionStale(false);
+
+    if (staleTimeoutRef.current) {
+      window.clearTimeout(staleTimeoutRef.current);
+    }
+
+    staleTimeoutRef.current = window.setTimeout(() => {
+      setLiveConnectionStale(true);
+    }, 500);
+
+    window.dispatchEvent(
+      new CustomEvent("LIVE_DATA_SYNC", {
+        detail: {
+          timestamp: Date.now(),
+          active: true
         }
       })
     );
@@ -262,6 +289,7 @@ export function useMockStream() {
         emitTerminalStateIfNew(data, telemetryRows);
         const updatedAt = data.last_updated ? new Date(data.last_updated) : new Date();
         setLastSyncedAt(buildTimeLabel(updatedAt));
+        markLiveConnection();
 
         if (Boolean(data.packet_weight_compression) && !Boolean(data.preemptive_shutdown)) {
           handleIntermediateBurst({
@@ -361,6 +389,7 @@ export function useMockStream() {
       emitTerminalStateIfNew(data, telemetryRows);
       const updatedAt = data.last_updated ? new Date(data.last_updated) : new Date();
       setLastSyncedAt(buildTimeLabel(updatedAt));
+      markLiveConnection();
 
       if (Boolean(data.packet_weight_compression) && !Boolean(data.preemptive_shutdown)) {
         handleIntermediateBurst({
@@ -455,6 +484,8 @@ export function useMockStream() {
     lastSyncedAt,
     refreshNow,
     togglePause,
-    clearFeed
+    clearFeed,
+    liveConnectionActive,
+    liveConnectionStale
   };
 }

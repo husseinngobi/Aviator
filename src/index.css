@@ -225,6 +225,56 @@ select {
   animation: hudCalibratingPulse 1s ease-in-out infinite;
 }
 
+.live-connection-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(125, 166, 188, 0.2);
+}
+
+.live-connection-indicator .hud-label {
+  font-size: 0.72rem;
+  color: #7da6bc;
+  margin: 0;
+}
+
+.live-indicator-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  animation: liveIndicatorPulse 1.5s ease-in-out infinite;
+  box-shadow: 0 0 8px currentColor;
+}
+
+.live-indicator-dot {
+  background-color: #6b7280;
+}
+
+@keyframes liveIndicatorPulse {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.live-connection-indicator .hud-value {
+  font-size: 1.4rem;
+  margin: 0;
+  letter-spacing: 0.1em;
+  font-weight: 700;
+}
+
 .telemetry-history-compact {
   position: sticky;
   top: 132px;

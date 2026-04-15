@@ -24,7 +24,9 @@ function DashboardPage() {
     lastSyncedAt,
     refreshNow,
     togglePause,
-    clearFeed
+    clearFeed,
+    liveConnectionActive,
+    liveConnectionStale
   } = useMockStream();
 
   useEffect(() => {
@@ -155,9 +157,17 @@ function DashboardPage() {
   const signalStabilityIcon =
     riskIndicator === "LOW" ? "✅" : riskIndicator === "MEDIUM" ? "▲" : riskIndicator === "HIGH" ? "⚠️" : riskIndicator === "ABORT" ? "🛑" : "■";
 
+  const liveConnectionColor = liveConnectionActive && !liveConnectionStale ? "#22c55e" : liveConnectionActive ? "#eab308" : "#6b7280";
+  const liveConnectionLabel = liveConnectionActive && !liveConnectionStale ? "LIVE" : liveConnectionStale ? "STALE" : "IDLE";
+
   return (
     <main className="dashboard-shell">
       <header className="hud-header">
+        <div className="hud-metric-block live-connection-indicator">
+          <span className="hud-label">LIVE_CONNECTION</span>
+          <div className="live-indicator-dot" style={{ backgroundColor: liveConnectionColor }}></div>
+          <strong className="hud-value" style={{ color: liveConnectionColor }}>{liveConnectionLabel}</strong>
+        </div>
         <div className="hud-metric-block">
           <span className="hud-label">NEXT_SLA_TARGET</span>
           <strong className="hud-value hud-prediction current-prediction">

@@ -5,7 +5,8 @@
   "description": "Automatic WebSocket telemetry monitor for realtime dashboard ingestion.",
   "permissions": ["storage"],
   "host_permissions": [
-    "*://*/games/aviator*",
+    "*://fortebet.com/*",
+    "*://www.fortebet.com/*",
     "http://127.0.0.1:5000/*"
   ],
   "background": {
@@ -16,7 +17,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["*://*/games/aviator*"],
+      "matches": ["*://fortebet.com/*", "*://www.fortebet.com/*"],
       "js": ["content.js"],
       "run_at": "document_start"
     }
@@ -24,7 +25,7 @@
   "web_accessible_resources": [
     {
       "resources": ["monitor.js"],
-      "matches": ["*://*/games/aviator*"]
+      "matches": ["*://fortebet.com/*", "*://www.fortebet.com/*"]
     }
   ]
 }
