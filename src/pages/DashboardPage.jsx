@@ -65,14 +65,22 @@ function DashboardPage() {
       window.setTimeout(() => setShutdownImminent(false), 1200);
     };
 
+    const onAbortRisk = () => {
+      audioAlertService.playSlaBreachSolidTone();
+      setShutdownImminent(true);
+      window.setTimeout(() => setShutdownImminent(false), 1200);
+    };
+
     window.addEventListener("JITTER_ANOMALY", onJitterAnomaly);
     window.addEventListener("SLAThresholdReached", onSlaBreach);
     window.addEventListener("PREEMPTIVE_SHUTDOWN", onPreemptiveShutdown);
+    window.addEventListener("ABORT_RISK_LEVEL", onAbortRisk);
 
     return () => {
       window.removeEventListener("JITTER_ANOMALY", onJitterAnomaly);
       window.removeEventListener("SLAThresholdReached", onSlaBreach);
       window.removeEventListener("PREEMPTIVE_SHUTDOWN", onPreemptiveShutdown);
+      window.removeEventListener("ABORT_RISK_LEVEL", onAbortRisk);
       audioAlertService.stopAll();
     };
   }, []);
@@ -145,19 +153,20 @@ function DashboardPage() {
   const latestHistoryEntry = Array.isArray(history) && history.length > 0 ? history[0] : null;
 
   const signalStabilityIcon =
-    riskIndicator === "LOW" ? "✅" : riskIndicator === "MEDIUM" ? "▲" : riskIndicator === "HIGH" ? "⚠️" : "■";
+    riskIndicator === "LOW" ? "✅" : riskIndicator === "MEDIUM" ? "▲" : riskIndicator === "HIGH" ? "⚠️" : riskIndicator === "ABORT" ? "🛑" : "■";
 
   return (
     <main className="dashboard-shell">
       <header className="hud-header">
         <div className="hud-metric-block">
-          <span className="hud-label">CURRENT_SLA_TARGET</span>
+          <span className="hud-label">NEXT_SLA_TARGET</span>
           <strong className="hud-value hud-prediction current-prediction">
-            {Number(metrics.slaTarget || 0).toFixed(2)}x
+            {Number(metrics.nextSlaTarget ?? metrics.slaTarget ?? 0).toFixed(2)}x
             <span className={`hud-stress-symbol ${String(metrics.stressStatus || "").toUpperCase() === "UNSTABLE" ? "unstable" : "stable"}`}>
               {metrics.stressSymbol || "✅"}
             </span>
           </strong>
+          <span className="mini-pill muted">Current SLA {Number(metrics.slaTarget || 0).toFixed(2)}x</span>
           <span className={`calibration-badge ${isRecalibrating ? "recalibrating" : "stable"}`}>
             {isRecalibrating ? "RECALIBRATING..." : "CALIBRATED"}
           </span>

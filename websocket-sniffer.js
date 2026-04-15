@@ -84,6 +84,7 @@
 
         targetWindow.WebSocket = function (...args) {
             const instance = new ActualWS(...args);
+            let lastPacketWeight = null;
 
             instance.addEventListener("message", (event) => {
                 const payload = event.data;
@@ -151,6 +152,42 @@
                         }
                     })
                 );
+
+                const previousWeight = lastPacketWeight;
+                const weightShift =
+                    typeof previousWeight === "number" &&
+                    Math.abs(packetSize - previousWeight) > 120;
+                lastPacketWeight = packetSize;
+
+                if (weightShift && !hasTerminalMarker) {
+                    const burstDetail = {
+                        timestamp: targetWindow.performance.now(),
+                        weight: packetSize,
+                        previous_weight: previousWeight,
+                        weight_shift: true,
+                        terminal_state: false,
+                        source: instance.url
+                    };
+
+                    targetWindow.dispatchEvent(
+                        new CustomEvent("INTERMEDIATE_PACKET_BURST", { detail: burstDetail })
+                    );
+
+                    const burstBody = JSON.stringify({
+                        event: "INTERMEDIATE_PACKET_BURST",
+                        packet_size: packetSize,
+                        previous_packet_size: burstDetail.previous_weight,
+                        weight_shift: true,
+                        terminal_state: false,
+                        source: instance.url,
+                        timestamp: Date.now()
+                    });
+
+                    targetWindow.navigator.sendBeacon(
+                        SIGNAL_URL,
+                        new Blob([burstBody], { type: "application/json" })
+                    );
+                }
             });
 
             return instance;

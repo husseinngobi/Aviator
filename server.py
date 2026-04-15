@@ -5,6 +5,7 @@ import os
 import time
 from datetime import datetime
 
+from congestion_logic import CongestionManager
 from integrity_monitor import GenericPacketSignatureMonitor, evaluate_integrity
 
 
@@ -275,6 +276,42 @@ class SystemController:
             "adaptive_target": self.adaptive_target,
         }
 
+
+class SlaPredictor:
+    """Lightweight next-round SLA predictor updated on terminal-state packets."""
+
+    def __init__(self, initial_target=1.5, alpha=0.45, min_target=0.1, max_target=5.0):
+        self.alpha = max(0.05, min(1.0, float(alpha)))
+        self.min_target = max(0.05, float(min_target))
+        self.max_target = max(self.min_target, float(max_target))
+        self.current_target = float(initial_target)
+
+    def _clamp(self, value):
+        return max(self.min_target, min(self.max_target, float(value)))
+
+    def update_from_terminal_state(self, terminal_value, baseline_target, risk_level="LOW"):
+        baseline = self._clamp(baseline_target)
+        measured = float(terminal_value)
+        variance = baseline - measured
+        proposed = baseline + (variance * 0.35)
+
+        normalized_risk = str(risk_level or "LOW").upper()
+        if normalized_risk == "HIGH":
+            proposed *= 0.88
+        elif normalized_risk == "MEDIUM":
+            proposed *= 0.94
+
+        proposed = self._clamp(proposed)
+        self.current_target = self._clamp(
+            (self.alpha * proposed) + ((1.0 - self.alpha) * self.current_target)
+        )
+        return round(self.current_target, 4)
+
+    def get_current_target(self, fallback_target):
+        baseline = self._clamp(fallback_target)
+        self.current_target = self._clamp(self.current_target if self.current_target else baseline)
+        return round(self.current_target, 4)
+
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
@@ -287,7 +324,8 @@ MIN_SLA_THRESHOLD = 0.10
 # Global State Variables
 current_integrity = 0.0
 session_start_integrity = 0.0
-telemetry_history = []
+congestion_manager = CongestionManager(max_history=500)
+telemetry_history = congestion_manager.history
 signal_history = telemetry_history
 operational_streak = 0
 current_allocation = BASE_ALLOCATION
@@ -305,6 +343,11 @@ controller = SystemController(
     min_input=0.0,
     max_input=BASE_ALLOCATION * 4,
     critical_load_limit=BASE_ALLOCATION * 3,
+)
+predictor = SlaPredictor(
+    initial_target=target_efficiency,
+    min_target=MIN_SLA_THRESHOLD,
+    max_target=5.0,
 )
 
 
@@ -330,10 +373,12 @@ def load_system_state():
             with open(STATE_FILE, "r") as f:
                 data = json.load(f)
                 current_integrity = data.get("current_integrity", 0.0)
-                telemetry_history[:] = data.get("telemetry_history", data.get("history", []))
+                persisted_history = data.get("telemetry_history", data.get("history", []))
+                congestion_manager.replace_history(persisted_history)
                 operational_streak = data.get("streak", 0)
                 last_ping_ms = data.get("ping_ms", 0.0)
                 last_inter_packet_delta_ms = float(data.get("last_inter_packet_delta_ms", 0.0) or 0.0)
+                predictor.current_target = float(data.get("predictor_target", predictor.current_target) or predictor.current_target)
                 controller_state = data.get("controller_state", {})
                 controller.current_input = float(controller_state.get("current_input", controller.current_input))
                 controller.last_efficiency = controller_state.get("last_efficiency", controller.last_efficiency)
@@ -361,6 +406,7 @@ def save_system_state():
             "streak": operational_streak,
             "ping_ms": last_ping_ms,
             "last_inter_packet_delta_ms": last_inter_packet_delta_ms,
+            "predictor_target": predictor.current_target,
             "controller_state": controller.get_state(),
         }, f)
 
@@ -543,6 +589,7 @@ def _build_history_record(data, sensor_value, packet_signature, packet_size, pac
             data.get("sla_threshold", target_efficiency),
             controller_result,
         ),
+        "sla_target": round(float(data.get("sla_threshold", target_efficiency)), 6),
     }
 
 # --- TELEMETRY ROUTES ---
@@ -621,6 +668,38 @@ def process_telemetry():
             "reason": "integrity_monitor_hold",
         }
 
+    incoming_event = str(data.get("event", "")).strip().upper()
+    if incoming_event == "INTERMEDIATE_PACKET_BURST":
+        controller_result = {
+            **controller_result,
+            "state": "MIDGAME_ABORT_SIGNAL",
+            "reason": "intermediate_packet_burst",
+            "risk_level": "ABORT",
+            "system_mode": "PROTECTIVE",
+        }
+        packet_guard = {
+            **packet_guard,
+            "stress_status": "UNSTABLE",
+            "stress_symbol": "⚠️",
+        }
+
+    terminal_state_received = incoming_event in {"TERMINAL_STATE", "THROUGHPUT_FINALIZED"}
+
+    if not terminal_state_received:
+        terminal_state_received = bool(
+            str(controller_result.get("state", "")).upper() in {"SYSTEMHALT", "PREEMPTIVE_SHUTDOWN"}
+            or packet_guard.get("preemptive_shutdown", False)
+        )
+
+    if terminal_state_received:
+        next_sla_target = predictor.update_from_terminal_state(
+            terminal_value=sensor_value,
+            baseline_target=effective_threshold,
+            risk_level=controller_result.get("risk_level", controller.risk_level),
+        )
+    else:
+        next_sla_target = predictor.get_current_target(effective_threshold)
+
     telemetry_record = _build_history_record(
         data,
         sensor_value,
@@ -636,10 +715,10 @@ def process_telemetry():
         controller_result,
     )
     telemetry_record["ema_stability_score"] = derive_ema_stability_score(controller, packet_guard)
+    telemetry_record["terminal_state"] = bool(terminal_state_received)
+    telemetry_record["next_sla_target"] = float(next_sla_target)
 
-    telemetry_history.insert(0, telemetry_record)
-    if len(telemetry_history) > 500:
-        telemetry_history.pop()
+    congestion_manager.ingest_record(telemetry_record)
 
     if sensor_value >= target_efficiency:
         operational_streak += 1
@@ -654,6 +733,7 @@ def process_telemetry():
         "allocation_units": f"{current_allocation:,.0f} UGX",
         "target_set_point": f"{effective_threshold}x",
         "sla_threshold": effective_threshold,
+        "next_sla_target": next_sla_target,
         "ping_ms": round(last_ping_ms, 2),
         "streak": operational_streak,
         "packet_signature": packet_guard.get("normalized_signature", packet_signature),
@@ -675,12 +755,15 @@ def process_telemetry():
         "history": telemetry_history,
         "controller_state": controller.get_state(),
         "packet_monitor": packet_monitor.snapshot(),
+        "last_updated": congestion_manager.last_updated,
     })
 
 @app.route('/get_stats', methods=['GET'])
 def get_stats():
     effective_threshold = compute_latency_adjusted_threshold(target_efficiency, last_ping_ms)
-    latest_record = telemetry_history[0] if telemetry_history else {}
+    latest_record = congestion_manager.latest_record()
+    history_snapshot = congestion_manager.history
+    last_updated = congestion_manager.last_updated
     if isinstance(latest_record, dict):
         status = str(latest_record.get("controller_state", "PID_TRACKING"))
         allocation = float(latest_record.get("control_output", controller.current_input))
@@ -706,6 +789,7 @@ def get_stats():
                 ),
             )
         )
+        next_sla_target = float(latest_record.get("next_sla_target", predictor.get_current_target(effective_threshold)) or predictor.get_current_target(effective_threshold))
     else:
         status, allocation, target = calculate_resource_scaling(
             telemetry_history,
@@ -724,17 +808,22 @@ def get_stats():
         stress_status = "UNSTABLE" if latency_spike else "STABLE"
         ema_stability_score = derive_ema_stability_score(controller, {"preemptive_shutdown": latency_spike})
         calibration_status = derive_calibration_status(current_integrity, effective_threshold, {"state": status, "reason": ""})
+        next_sla_target = predictor.get_current_target(effective_threshold)
+
+    if not last_updated:
+        last_updated = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
 
     return jsonify({
         "balance": f"{current_integrity:,.2f} UGX",
-        "telemetry_history": telemetry_history,
-        "history": telemetry_history,
+        "telemetry_history": history_snapshot,
+        "history": history_snapshot,
         "decision": status,
         "system_status": status,
         "next_stake": f"{allocation:,.0f} UGX",
         "recommended_intensity": f"{allocation:,.0f} UGX",
         "next_exit": f"{target}x",
         "sla_threshold": target,
+        "next_sla_target": next_sla_target,
         "ping_ms": round(last_ping_ms, 2),
         "streak": operational_streak,
         "packet_monitor_status": packet_status,
@@ -754,8 +843,24 @@ def get_stats():
         "control_output": round(allocation, 6),
         "controller_state": controller.get_state(),
         "packet_monitor": packet_monitor.snapshot(),
-        "analysis_ready": bool(telemetry_history),
-        "samples": len(telemetry_history),
+        "analysis_ready": bool(history_snapshot),
+        "samples": len(history_snapshot),
+        "last_updated": last_updated,
+    })
+
+
+@app.route('/history', methods=['GET'])
+def get_history():
+    snapshot = congestion_manager.snapshot()
+    last_updated = snapshot.get("last_updated")
+    if not last_updated:
+        last_updated = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+
+    return jsonify({
+        "history": snapshot.get("history", []),
+        "telemetry_history": snapshot.get("history", []),
+        "count": snapshot.get("count", 0),
+        "last_updated": last_updated,
     })
 
 if __name__ == '__main__':

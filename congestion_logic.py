@@ -5,6 +5,38 @@ from dataclasses import dataclass, field
 class CongestionManager:
     """Controller utilities for congestion and safety decisions."""
 
+    def __init__(self, max_history=500):
+        self.max_history = max(1, int(max_history))
+        self.history = []
+        self.last_updated = None
+
+    def ingest_record(self, record):
+        """Insert newest telemetry first and keep bounded in-memory history."""
+        if not isinstance(record, dict):
+            return
+
+        self.history.insert(0, record)
+        if len(self.history) > self.max_history:
+            self.history.pop()
+
+        self.last_updated = record.get("timestamp")
+
+    def replace_history(self, records):
+        """Replace in-memory history with persisted rows (newest-first)."""
+        safe_records = [item for item in (records or []) if isinstance(item, dict)]
+        self.history[:] = safe_records[: self.max_history]
+        self.last_updated = self.history[0].get("timestamp") if self.history else None
+
+    def latest_record(self):
+        return self.history[0] if self.history else {}
+
+    def snapshot(self):
+        return {
+            "history": self.history,
+            "last_updated": self.last_updated,
+            "count": len(self.history),
+        }
+
     @staticmethod
     def check_safety_cutoff(current_value, set_point):
         """

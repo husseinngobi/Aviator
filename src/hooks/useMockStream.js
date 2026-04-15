@@ -32,6 +32,7 @@ export function useMockStream() {
   const [analysisReady, setAnalysisReady] = useState(false);
   const [samples, setSamples] = useState(0);
   const [slaTarget, setSlaTarget] = useState(1.5);
+  const [nextSlaTarget, setNextSlaTarget] = useState(1.5);
   const [riskLevel, setRiskLevel] = useState("LOW");
   const [systemMode, setSystemMode] = useState("NOMINAL");
   const [emaStabilityScore, setEmaStabilityScore] = useState(100);
@@ -60,6 +61,7 @@ export function useMockStream() {
   const lastTerminalKeyRef = useRef(null);
   const lastLatencyRef = useRef(null);
   const lastPreemptiveShutdownRef = useRef(false);
+  const lastPacketWeightRef = useRef(null);
 
   const emitJitterAnomalyIfNeeded = (latencyMs) => {
     const previous = lastLatencyRef.current;
@@ -143,6 +145,38 @@ export function useMockStream() {
     );
   };
 
+  const handleIntermediateBurst = (detail) => {
+    const burst = detail && typeof detail === "object" ? detail : {};
+    const packetWeight = Number(burst.weight ?? burst.packetSize ?? burst.packet_size ?? 0);
+    const previousWeight = lastPacketWeightRef.current;
+    lastPacketWeightRef.current = packetWeight;
+
+    const weightShift = Boolean(burst.weight_shift) || (
+      Number.isFinite(previousWeight) && Number.isFinite(packetWeight) && Math.abs(packetWeight - previousWeight) > 120
+    );
+    const terminalState = Boolean(burst.terminal_state);
+
+    if (!weightShift || terminalState) {
+      return;
+    }
+
+    setRiskLevel("ABORT");
+    setDecision("ABORT");
+    setSystemMode("PROTECTIVE");
+    setStressStatus("UNSTABLE");
+    setPacketMonitorStatus("INTERMEDIATE_PACKET_BURST");
+
+    window.dispatchEvent(
+      new CustomEvent("ABORT_RISK_LEVEL", {
+        detail: {
+          reason: "Intermediate Packet Bursts",
+          packet_weight: packetWeight,
+          timestamp: Date.now()
+        }
+      })
+    );
+  };
+
   useEffect(() => {
     const onUiSyncLock = (event) => {
       const detail = event.detail || {};
@@ -161,6 +195,20 @@ export function useMockStream() {
     return () => {
       window.removeEventListener("UI_SYNC_LOCK", onUiSyncLock);
       window.removeEventListener("UI_SYNC_UNLOCK", onUiSyncUnlock);
+    };
+  }, []);
+
+  useEffect(() => {
+    const onIntermediateBurst = (event) => {
+      handleIntermediateBurst(event.detail || {});
+    };
+
+    window.addEventListener("INTERMEDIATE_PACKET_BURST", onIntermediateBurst);
+    window.addEventListener("Intermediate Packet Bursts", onIntermediateBurst);
+
+    return () => {
+      window.removeEventListener("INTERMEDIATE_PACKET_BURST", onIntermediateBurst);
+      window.removeEventListener("Intermediate Packet Bursts", onIntermediateBurst);
     };
   }, []);
 
@@ -206,11 +254,22 @@ export function useMockStream() {
         setShutdownReason(data.preemptive_shutdown_reason ?? null);
         const telemetryRows = safeHistory(data.telemetry_history ?? data.history);
         setHistory(telemetryRows);
+        const nextTarget = toFloat(data.next_sla_target, toFloat(data.sla_threshold, 1.5));
         setSlaTarget(toFloat(data.sla_threshold, 1.5));
+        setNextSlaTarget(nextTarget);
         emitPreemptiveShutdownIfNeeded(data);
         emitServerLatencySpikeIfNeeded(data);
         emitTerminalStateIfNew(data, telemetryRows);
-        setLastSyncedAt(buildTimeLabel(new Date()));
+        const updatedAt = data.last_updated ? new Date(data.last_updated) : new Date();
+        setLastSyncedAt(buildTimeLabel(updatedAt));
+
+        if (Boolean(data.packet_weight_compression) && !Boolean(data.preemptive_shutdown)) {
+          handleIntermediateBurst({
+            weight_shift: true,
+            terminal_state: false,
+            packet_size: Number(data.packet_arrival_delta_ms ?? 0),
+          });
+        }
 
         setEvents((current) => [
           {
@@ -244,7 +303,7 @@ export function useMockStream() {
     };
 
     sync();
-    const timer = window.setInterval(sync, 1000);
+    const timer = window.setInterval(sync, 100);
 
     return () => {
       mounted = false;
@@ -294,11 +353,22 @@ export function useMockStream() {
       setShutdownReason(data.preemptive_shutdown_reason ?? null);
       const telemetryRows = safeHistory(data.telemetry_history ?? data.history);
       setHistory(telemetryRows);
+      const nextTarget = toFloat(data.next_sla_target, toFloat(data.sla_threshold, 1.5));
       setSlaTarget(toFloat(data.sla_threshold, 1.5));
+      setNextSlaTarget(nextTarget);
       emitPreemptiveShutdownIfNeeded(data);
       emitServerLatencySpikeIfNeeded(data);
       emitTerminalStateIfNew(data, telemetryRows);
-      setLastSyncedAt(buildTimeLabel(new Date()));
+      const updatedAt = data.last_updated ? new Date(data.last_updated) : new Date();
+      setLastSyncedAt(buildTimeLabel(updatedAt));
+
+      if (Boolean(data.packet_weight_compression) && !Boolean(data.preemptive_shutdown)) {
+        handleIntermediateBurst({
+          weight_shift: true,
+          terminal_state: false,
+          packet_size: Number(data.packet_arrival_delta_ms ?? 0),
+        });
+      }
 
       setEvents((current) => [
         {
@@ -362,6 +432,7 @@ export function useMockStream() {
       analysisReady,
       samples,
       slaTarget,
+      nextSlaTarget,
       riskLevel,
       systemMode,
       emaStabilityScore,
