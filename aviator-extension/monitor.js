@@ -29,18 +29,49 @@
     }
   }
 
-  function extractThroughputIndex(json) {
-    if (!json || typeof json !== "object") return null;
-
-    const value =
-      json.throughput_index ??
-      json.multiplier ??
-      json.value ??
-      json.v ??
-      null;
-
-    const num = Number(value);
+  function parseNumeric(value) {
+    const num = Number(String(value).replace(/[^0-9.\-]/g, ""));
     return Number.isFinite(num) ? num : null;
+  }
+
+  function extractThroughputIndex(payload, json) {
+    if (json && typeof json === "object") {
+      const direct = parseNumeric(
+        json.throughput_index ??
+        json.multiplier ??
+        json.value ??
+        json.v ??
+        json.m ??
+        json.data?.v ??
+        json.data?.m ??
+        json.data?.multiplier ??
+        null
+      );
+
+      if (direct !== null) return direct;
+
+      if (json.data && typeof json.data === "object") {
+        const nested = parseNumeric(
+          json.data.throughput_index ??
+          json.data.multiplier ??
+          json.data.value ??
+          json.data.v ??
+          json.data.m ??
+          null
+        );
+
+        if (nested !== null) return nested;
+      }
+    }
+
+    if (typeof payload === "string") {
+      const inlineMatch = payload.match(/(?:"|')?(?:throughput_index|multiplier|value|v|m)(?:"|')?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)/i);
+      if (inlineMatch) {
+        return parseNumeric(inlineMatch[1]);
+      }
+    }
+
+    return null;
   }
 
   function extractPacketSignature(json) {
@@ -73,16 +104,24 @@
       const raw = event.data;
       const packetSize = getPacketSize(raw);
       const json = parseJSON(raw);
-      const throughputIndex = extractThroughputIndex(json);
+      const throughputIndex = extractThroughputIndex(raw, json);
       const packetSignature = extractPacketSignature(json);
       const isCriticalSignature = CRITICAL_SIGNATURES.has(packetSignature);
+      const rawPacketData = typeof raw === "string" ? raw : null;
+
+      if (packetSignature === "CRASH_SIGNAL" || packetSignature === "CRASH" || packetSignature === "TERMINAL_STATE") {
+        console.log("[WS TELEMETRY EXT] Crash Signal packet size:", packetSize, "bytes");
+        console.log("[WS TELEMETRY EXT] raw event.data preview:", rawPacketData ? rawPacketData.slice(0, 120) : String(raw));
+      }
 
       emitTelemetry({
         event: "WS_PACKET",
         throughput_index: throughputIndex,
         packet_size: packetSize,
         packet_signature: packetSignature,
-        raw: throughputIndex,
+        raw: rawPacketData,
+        raw_packet_data: rawPacketData,
+        raw_packet_size: packetSize,
         timestamp: Date.now(),
         socket_url: socket.url,
         marker: "tick"
@@ -97,7 +136,9 @@
             throughput_index: throughputIndex,
             packet_size: packetSize,
             packet_signature: packetSignature,
-            raw: throughputIndex,
+            raw: rawPacketData,
+            raw_packet_data: rawPacketData,
+            raw_packet_size: packetSize,
             timestamp: Date.now(),
             socket_url: socket.url,
             marker: "finalized"
@@ -111,7 +152,9 @@
           throughput_index: throughputIndex,
           packet_size: packetSize,
           packet_signature: packetSignature,
-          raw: throughputIndex,
+          raw: rawPacketData,
+          raw_packet_data: rawPacketData,
+          raw_packet_size: packetSize,
           timestamp: Date.now(),
           socket_url: socket.url,
           marker: "size-threshold"

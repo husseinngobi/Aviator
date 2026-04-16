@@ -13,7 +13,7 @@ function buildEntryKey(entry) {
   return String(entry?.timestamp ?? `${entry?.sensor_value ?? "na"}-${entry?.packet_signature ?? "na"}`);
 }
 
-function normalizeEntry(entry, fallbackSlaTarget) {
+function normalizeEntry(entry, fallbackSlaTarget, sourceIndex = 0) {
   const sensorValue = toFloat(entry?.sensor_value, 0);
   const finalThroughputIndex = toFloat(
     entry?.final_throughput_index ?? entry?.control_output ?? entry?.sensor_value,
@@ -30,10 +30,12 @@ function normalizeEntry(entry, fallbackSlaTarget) {
   const confidenceScore = clamp(Math.round(100 - (pidVariance * 100)), 0, 100);
   const hitSlaTarget = finalThroughputIndex >= slaTarget;
   const firstCrashTrap = finalThroughputIndex < 1.2;
+  const canonicalKey = buildEntryKey(entry);
 
   return {
     ...entry,
-    key: buildEntryKey(entry),
+    canonical_key: canonicalKey,
+    key: `${canonicalKey}-${sourceIndex}`,
     sensor_value: sensorValue,
     final_throughput_index: finalThroughputIndex,
     sla_target: slaTarget,
@@ -51,7 +53,7 @@ function dedupeByKey(items) {
   const output = [];
 
   for (const item of items) {
-    const key = item?.key ?? buildEntryKey(item);
+    const key = item?.canonical_key ?? buildEntryKey(item);
     if (seen.has(key)) continue;
     seen.add(key);
     output.push(item);
@@ -65,7 +67,7 @@ function TelemetryHistory({ history, slaTarget }) {
     if (!Array.isArray(history)) return [];
 
     const mapped = history.map((item, index) => ({
-      ...normalizeEntry(item, slaTarget),
+      ...normalizeEntry(item, slaTarget, index),
       __index: index
     }));
 
@@ -94,7 +96,7 @@ function TelemetryHistory({ history, slaTarget }) {
       const detail = event.detail;
       if (!detail || typeof detail !== "object") return;
 
-      const normalized = normalizeEntry(detail, slaTarget);
+      const normalized = normalizeEntry(detail, slaTarget, Date.now());
       setEntries((current) => dedupeByKey([normalized, ...current]).slice(0, 60));
     };
 

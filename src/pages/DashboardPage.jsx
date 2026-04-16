@@ -73,16 +73,22 @@ function DashboardPage() {
       window.setTimeout(() => setShutdownImminent(false), 1200);
     };
 
+    const onBackendOffline = () => {
+      audioAlertService.stopAll();
+    };
+
     window.addEventListener("JITTER_ANOMALY", onJitterAnomaly);
     window.addEventListener("SLAThresholdReached", onSlaBreach);
     window.addEventListener("PREEMPTIVE_SHUTDOWN", onPreemptiveShutdown);
     window.addEventListener("ABORT_RISK_LEVEL", onAbortRisk);
+    window.addEventListener("BACKEND_OFFLINE", onBackendOffline);
 
     return () => {
       window.removeEventListener("JITTER_ANOMALY", onJitterAnomaly);
       window.removeEventListener("SLAThresholdReached", onSlaBreach);
       window.removeEventListener("PREEMPTIVE_SHUTDOWN", onPreemptiveShutdown);
       window.removeEventListener("ABORT_RISK_LEVEL", onAbortRisk);
+      window.removeEventListener("BACKEND_OFFLINE", onBackendOffline);
       audioAlertService.stopAll();
     };
   }, []);
@@ -103,6 +109,7 @@ function DashboardPage() {
       metrics.packetWeightCompression ||
       metrics.preemptiveShutdown ||
       String(metrics.packetMonitorStatus || "").toUpperCase() === "PREEMPTIVE_SHUTDOWN" ||
+      String(metrics.packetMonitorStatus || "").toUpperCase() === "CRITICAL_STRESS_DETECTED" ||
       hasFirstCrashSignature
     );
 
@@ -152,6 +159,7 @@ function DashboardPage() {
   const signalStressScore = Math.max(0, Math.min(100, Number(metrics.emaStabilityScore ?? 100)));
   const signalStressCritical = stressPulse || signalStressScore <= 80 || metrics.preemptiveShutdown;
   const showShutdownWarning = shutdownImminent || metrics.preemptiveShutdown || metrics.packetWeightCompression;
+  const backendDisconnected = !connection.online || !liveConnectionActive || liveConnectionStale;
   const latestHistoryEntry = Array.isArray(history) && history.length > 0 ? history[0] : null;
 
   const signalStabilityIcon =
@@ -204,6 +212,15 @@ function DashboardPage() {
           </div>
         </div>
       </header>
+
+      {backendDisconnected && (
+        <div className="backend-disconnected-banner" role="alert" aria-live="assertive">
+          BACKEND DISCONNECTED
+          <span>
+            Live telemetry is unavailable. Start the Flask backend and confirm game websocket forwarding before trusting predictions.
+          </span>
+        </div>
+      )}
 
       {showShutdownWarning && (
         <div className="shutdown-imminent-banner">

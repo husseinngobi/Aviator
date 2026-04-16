@@ -1,11 +1,21 @@
 // ==UserScript==
 // @name         Network Telemetry Monitor + Overlay (Safe)
 // @namespace    http://tampermonkey.net/
-// @version      1.1.0
+// @version      1.2.0
 // @description  WebSocket telemetry monitor with draggable neon overlay badge (no automated UI clicks)
-// @match        *://*/games/aviator*
+// @match        *://*.spribe.io/*
+// @match        *://mobile.fortebet.ug/*
+// @match        *://fortebet.ug/*
+// @match        *://*.fortebet.ug/*
+// @match        *://fortebet.com/*
+// @match        *://*.fortebet.com/*
+// @connect      127.0.0.1
+// @connect      localhost
+// @connect      fortebet.ug
+// @connect      fortebet.com
 // @grant        none
 // @run-at       document-start
+// @allFrames    true
 // ==/UserScript==
 
 (function () {
@@ -13,6 +23,8 @@
 
   if (window.__TELEMETRY_TM_ACTIVE__) return;
   window.__TELEMETRY_TM_ACTIVE__ = true;
+
+  console.log("[TM TELEMETRY] active on", location.hostname, location.pathname);
 
   const SIGNAL_URL = "http://127.0.0.1:5000/signal";
   const STATS_URL = "http://127.0.0.1:5000/get_stats";
@@ -155,6 +167,15 @@
     });
   }
 
+  function bridgeCriticalStress(weight) {
+    postSignal({
+      event: "CRITICAL_STRESS_DETECTED",
+      weight: weight,
+      timestamp: Date.now(),
+      source: location.href
+    });
+  }
+
   function parseNumeric(value) {
     const n = Number(String(value).replace(/[^0-9.\-]/g, ""));
     return Number.isFinite(n) ? n : null;
@@ -177,9 +198,46 @@
     }
   }
 
-  function extractThroughput(json) {
-    if (!json || typeof json !== "object") return null;
-    return parseNumeric(json.throughput_index ?? json.multiplier ?? json.value ?? json.v ?? null);
+  function extractThroughput(payload, json) {
+    const source = json && typeof json === "object" ? json : null;
+
+    if (source) {
+      const direct = parseNumeric(
+        source.throughput_index ??
+        source.multiplier ??
+        source.value ??
+        source.v ??
+        source.m ??
+        source.data?.v ??
+        source.data?.m ??
+        source.data?.multiplier ??
+        null
+      );
+
+      if (direct !== null) return direct;
+
+      if (source.data && typeof source.data === "object") {
+        const nested = parseNumeric(
+          source.data.throughput_index ??
+          source.data.multiplier ??
+          source.data.value ??
+          source.data.v ??
+          source.data.m ??
+          null
+        );
+
+        if (nested !== null) return nested;
+      }
+    }
+
+    if (typeof payload === "string") {
+      const inlineMatch = payload.match(/(?:"|')?(?:throughput_index|multiplier|value|v|m)(?:"|')?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)/i);
+      if (inlineMatch) {
+        return parseNumeric(inlineMatch[1]);
+      }
+    }
+
+    return null;
   }
 
   function extractPacketSignature(json) {
@@ -196,8 +254,11 @@
         body: JSON.stringify(payload),
         keepalive: true
       });
+      if (payload?.event === "THROUGHPUT_FINALIZED" || payload?.event === "TERMINAL_STATE") {
+        console.log("[TM TELEMETRY] relayed", payload.event, payload.throughput_index ?? payload.raw ?? "-");
+      }
     } catch {
-      // silent
+      console.warn("[TM TELEMETRY] relay failed: backend offline or blocked");
     }
   }
 
@@ -379,21 +440,42 @@
       state.lastPacketSize = size;
 
       const json = parseJSON(raw);
-      const throughput = extractThroughput(json);
+      const throughput = extractThroughput(raw, json);
       const signature = extractPacketSignature(json);
       if (throughput !== null) {
         state.lastThroughput = throughput;
       }
       state.lastPacketSignature = signature;
 
+      const rawPreview = typeof raw === "string"
+        ? raw.slice(0, 120)
+        : raw instanceof ArrayBuffer
+          ? `ArrayBuffer(${raw.byteLength})`
+          : ArrayBuffer.isView(raw)
+            ? `${raw.constructor?.name || "TypedArray"}(${raw.byteLength})`
+            : raw instanceof Blob
+              ? `Blob(${raw.size})`
+              : typeof raw;
+
+      if (signature === "CRASH_SIGNAL" || signature === "CRASH" || signature === "TERMINAL_STATE") {
+        console.log("[TM TELEMETRY] Crash Signal packet size:", size, "bytes");
+        console.log("[TM TELEMETRY] raw event.data preview:", rawPreview);
+      }
+
       if (size > HEAVY_PACKET_BYTES || (json && json.type === "f")) {
         const sig = `${signature}|${throughput ?? "na"}|${size}|${ws.url}`;
         if (sig !== state.lastPostedSignature) {
           state.lastPostedSignature = sig;
+          if (size > HEAVY_PACKET_BYTES) {
+            bridgeCriticalStress(size);
+          }
           postSignal({
-            event: "HEAVY_PACKET",
+            event: size > HEAVY_PACKET_BYTES ? "CRITICAL_STRESS_DETECTED" : "HEAVY_PACKET",
             throughput_index: throughput,
             packet_size: size,
+            raw_packet_data: typeof raw === "string" ? raw : null,
+            raw_packet_size: size,
+            weight: size,
             packet_signature: signature,
             timestamp: Date.now(),
             source: ws.url

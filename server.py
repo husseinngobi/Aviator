@@ -669,6 +669,24 @@ def process_telemetry():
         }
 
     incoming_event = str(data.get("event", "")).strip().upper()
+    if incoming_event == "CRITICAL_STRESS_DETECTED":
+        packet_guard = {
+            **packet_guard,
+            "status": "CRITICAL_STRESS_DETECTED",
+            "stress_status": "UNSTABLE",
+            "stress_symbol": "⚠️",
+            "packet_weight_compression": True,
+            "preemptive_shutdown": True,
+            "shutdown_reason": "critical_stress_detected",
+        }
+        controller_result = {
+            **controller_result,
+            "state": "CRITICAL_STRESS_DETECTED",
+            "reason": "critical_stress_detected",
+            "risk_level": "HIGH",
+            "system_mode": "PROTECTIVE",
+        }
+
     if incoming_event == "INTERMEDIATE_PACKET_BURST":
         controller_result = {
             **controller_result,

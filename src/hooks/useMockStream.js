@@ -66,6 +66,14 @@ export function useMockStream() {
   const lastPacketWeightRef = useRef(null);
   const lastDataFetchRef = useRef(Date.now());
   const staleTimeoutRef = useRef(null);
+  const eventSequenceRef = useRef(1);
+  const backendOfflineRef = useRef(false);
+  const lastFeedEventAtRef = useRef(0);
+
+  const nextEventId = () => {
+    eventSequenceRef.current += 1;
+    return `${Date.now()}-${eventSequenceRef.current}`;
+  };
 
   const emitJitterAnomalyIfNeeded = (latencyMs) => {
     const previous = lastLatencyRef.current;
@@ -127,16 +135,16 @@ export function useMockStream() {
   };
 
   const emitTerminalStateIfNew = (data, telemetryRows) => {
-    if (!Array.isArray(telemetryRows) || telemetryRows.length === 0) return;
+    if (!Array.isArray(telemetryRows) || telemetryRows.length === 0) return false;
 
     const latest = telemetryRows[0];
-    if (!latest || typeof latest !== "object") return;
+    if (!latest || typeof latest !== "object") return false;
 
     const latestKey = String(
       latest.timestamp ?? `${latest.sensor_value ?? "na"}-${latest.packet_signature ?? "na"}`
     );
 
-    if (lastTerminalKeyRef.current === latestKey) return;
+    if (lastTerminalKeyRef.current === latestKey) return false;
     lastTerminalKeyRef.current = latestKey;
 
     window.dispatchEvent(
@@ -147,6 +155,8 @@ export function useMockStream() {
         }
       })
     );
+
+    return true;
   };
 
   const markLiveConnection = () => {
@@ -242,9 +252,27 @@ export function useMockStream() {
   useEffect(() => {
     const start = Date.now();
     let mounted = true;
+    let inFlight = false;
+    let pollDelayMs = 100;
+    let timer = null;
+
+    const queueNextPoll = () => {
+      if (!mounted) return;
+      timer = window.setTimeout(sync, pollDelayMs);
+    };
 
     const sync = async () => {
-      if (isPaused || uiSyncLocked) return;
+      if (isPaused || uiSyncLocked) {
+        queueNextPoll();
+        return;
+      }
+
+      if (inFlight) {
+        queueNextPoll();
+        return;
+      }
+
+      inFlight = true;
 
       const started = performance.now();
 
@@ -256,7 +284,7 @@ export function useMockStream() {
 
         if (!mounted) return;
 
-        setMessages((count) => count + 1);
+        pollDelayMs = 100;
         setErrors(0);
         const nextLatency = Math.max(12, Math.round(performance.now() - started));
         setLatency(nextLatency);
@@ -286,10 +314,14 @@ export function useMockStream() {
         setNextSlaTarget(nextTarget);
         emitPreemptiveShutdownIfNeeded(data);
         emitServerLatencySpikeIfNeeded(data);
-        emitTerminalStateIfNew(data, telemetryRows);
+        const hasNewTelemetry = emitTerminalStateIfNew(data, telemetryRows);
+        if (hasNewTelemetry) {
+          setMessages((count) => count + 1);
+        }
         const updatedAt = data.last_updated ? new Date(data.last_updated) : new Date();
         setLastSyncedAt(buildTimeLabel(updatedAt));
         markLiveConnection();
+        backendOfflineRef.current = false;
 
         if (Boolean(data.packet_weight_compression) && !Boolean(data.preemptive_shutdown)) {
           handleIntermediateBurst({
@@ -299,43 +331,63 @@ export function useMockStream() {
           });
         }
 
-        setEvents((current) => [
-          {
-            id: Date.now(),
-            kind: "message",
-            title: "Live stats synced",
-            detail: `Balance ${data.balance} | Profit ${data.profit} | Streak ${data.streak}`,
-            time: buildTimeLabel(new Date())
-          },
-          ...current
-        ].slice(0, 8));
+        const now = Date.now();
+        if (now - lastFeedEventAtRef.current >= 3000) {
+          lastFeedEventAtRef.current = now;
+          setEvents((current) => [
+            {
+              id: nextEventId(),
+              kind: "message",
+              title: "Live stats synced",
+              detail: `Balance ${data.balance} | Profit ${data.profit ?? 0} | Streak ${data.streak}`,
+              time: buildTimeLabel(new Date())
+            },
+            ...current
+          ].slice(0, 8));
+        }
       } catch (error) {
         if (!mounted) return;
 
         setErrors((count) => count + 1);
+        pollDelayMs = Math.min(2000, pollDelayMs * 2);
         const nextLatency = Math.max(12, Math.round(performance.now() - started));
         setLatency(nextLatency);
-        emitJitterAnomalyIfNeeded(nextLatency);
         setUptime(Math.floor((Date.now() - start) / 1000));
-        setEvents((current) => [
-          {
-            id: Date.now(),
-            kind: "error",
-            title: "Backend offline",
-            detail: error.message,
-            time: buildTimeLabel(new Date())
-          },
-          ...current
-        ].slice(0, 8));
+        setDecision("BACKEND_OFFLINE");
+        setAnalysisReady(false);
+        setLiveConnectionActive(false);
+        setLiveConnectionStale(true);
+
+        if (!backendOfflineRef.current) {
+          backendOfflineRef.current = true;
+          window.dispatchEvent(new CustomEvent("BACKEND_OFFLINE", { detail: { timestamp: Date.now() } }));
+          setEvents((current) => [
+            {
+              id: nextEventId(),
+              kind: "error",
+              title: "Backend offline",
+              detail: error.message,
+              time: buildTimeLabel(new Date())
+            },
+            ...current
+          ].slice(0, 8));
+        }
+      } finally {
+        inFlight = false;
+        queueNextPoll();
       }
     };
 
     sync();
-    const timer = window.setInterval(sync, 100);
 
     return () => {
       mounted = false;
-      window.clearInterval(timer);
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+      if (staleTimeoutRef.current) {
+        window.clearTimeout(staleTimeoutRef.current);
+      }
     };
   }, [isPaused, uiSyncLocked]);
 
@@ -390,6 +442,7 @@ export function useMockStream() {
       const updatedAt = data.last_updated ? new Date(data.last_updated) : new Date();
       setLastSyncedAt(buildTimeLabel(updatedAt));
       markLiveConnection();
+      backendOfflineRef.current = false;
 
       if (Boolean(data.packet_weight_compression) && !Boolean(data.preemptive_shutdown)) {
         handleIntermediateBurst({
@@ -401,10 +454,10 @@ export function useMockStream() {
 
       setEvents((current) => [
         {
-          id: Date.now(),
+          id: nextEventId(),
           kind: "message",
           title: "Manual refresh completed",
-          detail: `Balance ${data.balance} | Profit ${data.profit} | Streak ${data.streak}`,
+          detail: `Balance ${data.balance} | Profit ${data.profit ?? 0} | Streak ${data.streak}`,
           time: buildTimeLabel(new Date())
         },
         ...current
@@ -413,17 +466,24 @@ export function useMockStream() {
       setErrors((count) => count + 1);
       const nextLatency = Math.max(12, Math.round(performance.now() - started));
       setLatency(nextLatency);
-      emitJitterAnomalyIfNeeded(nextLatency);
-      setEvents((current) => [
-        {
-          id: Date.now(),
-          kind: "error",
-          title: "Manual refresh failed",
-          detail: error.message,
-          time: buildTimeLabel(new Date())
-        },
-        ...current
-      ].slice(0, 8));
+      setDecision("BACKEND_OFFLINE");
+      setAnalysisReady(false);
+      setLiveConnectionActive(false);
+      setLiveConnectionStale(true);
+      if (!backendOfflineRef.current) {
+        backendOfflineRef.current = true;
+        window.dispatchEvent(new CustomEvent("BACKEND_OFFLINE", { detail: { timestamp: Date.now() } }));
+        setEvents((current) => [
+          {
+            id: nextEventId(),
+            kind: "error",
+            title: "Manual refresh failed",
+            detail: error.message,
+            time: buildTimeLabel(new Date())
+          },
+          ...current
+        ].slice(0, 8));
+      }
     }
   };
 
@@ -432,7 +492,7 @@ export function useMockStream() {
   const clearFeed = () => {
     setEvents([
       {
-        id: Date.now(),
+        id: nextEventId(),
         kind: "message",
         title: "Feed cleared",
         detail: "Local event history was cleared from the view.",
@@ -448,7 +508,7 @@ export function useMockStream() {
   }), [history.length]);
 
   return {
-    connection: { online: errors === 0 },
+    connection: { online: liveConnectionActive && !liveConnectionStale && errors === 0 },
     metrics: {
       messages,
       errors,
